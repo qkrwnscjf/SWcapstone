@@ -1,0 +1,110 @@
+# ============================================================
+# Global Configuration for Industrial Surface Defect Detection
+# ============================================================
+
+seed: 42
+
+# --- Dataset ---
+dataset:
+  root: "final_dataset/dataset_type"
+  types:
+    - Kolektor
+    - MVTec
+    - NEU   # anomaly-only; no normal images
+
+# --- Split Policy ---
+splits:
+  anchor_ratio: 0.20          # 20% held out as anchor (fixed across all rounds)
+  round_pool_split: [0.333, 0.333, 0.334]  # remaining 80% split into 3 round pools
+  round_train_ratio: 0.70     # within each round pool
+  round_val_ratio: 0.15
+  round_test_ratio: 0.15
+  # Gate splits include anomalies; Heatmap train is normal-only
+  gate_anomaly_ratio_train: 0.30  # target anomaly ratio in gate train set
+
+# --- Gate Model ---
+gate:
+  models:
+    effnetb0:
+      backbone: "efficientnet_b0"
+      pretrained: true
+      num_classes: 2           # normal vs anomaly
+      input_size: [224, 224]
+      batch_size: 32
+      epochs: 30
+      lr: 0.001
+      weight_decay: 0.0001
+      scheduler: "cosine"
+      pos_weight_auto: true    # auto-compute from class distribution
+    mnv3_large:
+      backbone: "mobilenet_v3_large"
+      pretrained: true
+      num_classes: 2
+      input_size: [224, 224]
+      batch_size: 32
+      epochs: 30
+      lr: 0.001
+      weight_decay: 0.0001
+      scheduler: "cosine"
+      pos_weight_auto: true
+
+# --- Heatmap Model ---
+heatmap:
+  models:
+    patchcore_r18:
+      backbone: "resnet18"
+      pretrained: true
+      input_size: [224, 224]
+      coreset_sampling_ratio: 0.10
+      num_neighbors: 9
+      batch_size: 32
+    patchcore_wrn50:
+      backbone: "wide_resnet50_2"
+      pretrained: true
+      input_size: [224, 224]
+      coreset_sampling_ratio: 0.10
+      num_neighbors: 9
+      batch_size: 16
+
+# --- Cascade Logic ---
+cascade:
+  T_high: 0.7                # p_gate >= T_high -> call heatmap
+  T_low: 0.3                 # p_gate <= T_low -> normal exit
+  # T_low < p_gate < T_high -> call heatmap (uncertain zone)
+  override_flags:
+    quality_low: false
+    drift_suspected: false
+    critical_line: false
+
+# --- Threshold Sweep ---
+threshold_sweep:
+  T_low_range: [0.1, 0.2, 0.3, 0.4, 0.5]
+  T_high_range: [0.5, 0.6, 0.7, 0.8, 0.9]
+  optimize_for: "recall"      # primary: anomaly recall
+  max_heatmap_call_rate: 0.50 # target ceiling
+
+# --- Calibration ---
+calibration:
+  methods: ["platt", "isotonic"]
+  cv_folds: 5
+
+# --- MLflow ---
+mlflow:
+  tracking_uri: "mlruns"
+  experiment_name: "surface_defect_detection"
+
+# --- Serving ---
+serve:
+  host: "0.0.0.0"
+  port: 8000
+
+# --- Improvement Policy (Phase 4) ---
+improvement:
+  max_iterations: 2
+  recall_threshold: 0.60       # trigger if below on anchor_test_mix
+  call_rate_threshold: 0.50    # trigger if above while recall < 0.80
+  knobs:
+    - "gate_calibration"
+    - "gate_pos_weight"
+    - "patchcore_backbone_switch"
+    - "patchcore_coreset_tune"

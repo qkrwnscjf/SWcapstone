@@ -1,0 +1,71 @@
+version: '3.8'
+
+services:
+  # Training service
+  train:
+    build: .
+    volumes:
+      - ./final_dataset:/app/data  # 로컬의 final_dataset 안쪽을 바로 /app/data로 연결
+      #- ./data:/app/data
+      - ./models:/app/models
+      - ./splits:/app/splits
+      - ./artifacts:/app/artifacts
+      - ./reports:/app/reports
+      - ./mlruns:/app/mlruns
+    environment:
+      - GATE_MODEL=effnetb0
+      - HEATMAP_MODEL=patchcore_r18
+      - MLFLOW_TRACKING_URI=file:///app/mlruns
+      - DEVICE=cpu
+    command: >
+      bash -c "
+        python src/train.py --round 1 --heatmap patchcore_r18 --device cpu &&
+        python src/train_gate.py --round 1 --gate effnetb0 --device cpu
+      "
+
+  # Serving service
+  serve:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./src:/app/src
+      - ./models:/app/models
+      - ./configs:/app/configs
+    environment:
+      # --- 이 부분을 수정하세요 ---
+      - GATE_MODEL_PATH=/app/models/round3_effnetb0_gate.pt #round3 학습 완료
+      - HEATMAP_MODEL_PATH=/app/models/round3_patchcore_r18_patchcore.pt #round3 학습 완료
+      #-------------------------
+      - GATE_MODEL=effnetb0
+      - HEATMAP_MODEL=patchcore_r18
+      # cascade.py 수정 후 임계치 확인 필요  (2/22)
+      - T_LOW=0.1
+      - T_HIGH=0.5
+      #- T_LOW=0.3
+      #- T_HIGH=0.7
+      - DEVICE=mps
+      - PYTHONPATH=/app:/app/src #추가
+    command: ["uvicorn", "src.serve:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+
+  # Dashboard service
+  dashboard:
+    build: .
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./artifacts:/app/artifacts
+      - ./reports:/app/reports
+      - ./mlruns:/app/mlruns
+    environment:
+      - MLFLOW_TRACKING_URI=file:///app/mlruns
+    command: ["python", "src/dashboard.py", "--format", "html", "--output", "/app/reports/dashboard.html"]
+
+  # MLflow UI
+  mlflow:
+    build: .
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./mlruns:/app/mlruns
+    command: ["mlflow", "ui", "--host", "0.0.0.0", "--port", "5000", "--backend-store-uri", "file:///app/mlruns"]

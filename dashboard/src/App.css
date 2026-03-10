@@ -1,0 +1,112 @@
+:root {
+  --blue: #2563eb;
+  --bg: #f8fafc;
+  --panel: #ffffff;
+  --border: #e2e8f0;
+  --text-main: #1e293b;
+  --text-sub: #64748b;
+  --anomaly: #dc2626;
+  --normal: #059669;
+}
+
+body {
+  margin: 0; padding: 0; background-color: var(--bg);
+  color: var(--text-main); font-family: 'Inter', system-ui, sans-serif;
+  display: flex; justify-content: center; align-items: center; min-height: 100vh;
+}
+
+.hmi-container {
+  width: 95vw; max-width: 1400px; height: 850px;
+  display: grid; grid-template-columns: 1fr 400px; grid-template-rows: 80px 1fr 180px;
+  gap: 20px; padding: 20px; box-sizing: border-box;
+}
+
+/* Header */
+header {
+  grid-column: 1 / span 2; background: var(--panel); border: 1px solid var(--border);
+  display: flex; justify-content: space-between; align-items: center; padding: 0 30px;
+}
+
+/* Main Monitoring Area */
+.monitor-panel {
+  grid-column: 1; grid-row: 2; background: #000; border: 1px solid var(--border);
+  position: relative; display: flex; justify-content: center; align-items: center;
+}
+
+.monitor-panel img { max-width: 100%; max-height: 100%; object-fit: contain; }
+
+/* Heatmap Overlay Layer */
+.heatmap-layer {
+  position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+  mix-blend-mode: screen; opacity: 0.5; pointer-events: none;
+}
+
+/* Sidebar Info Area */
+.side-panel {
+  grid-column: 2; grid-row: 2; display: flex; flex-direction: column; gap: 20px;
+}
+
+.card {
+  background: var(--panel); border: 1px solid var(--border); padding: 25px;
+  display: flex; flex-direction: column; flex: 1;
+}
+
+.status-badge {
+  font-size: 2.5rem; font-weight: 900; text-align: center; padding: 20px 0;
+  border: 4px solid; margin-top: 10px;
+}
+
+/* Bottom Log Area */
+.bottom-panel {
+  grid-column: 1 / span 2; grid-row: 3; background: var(--panel); border: 1px solid var(--border);
+  padding: 20px; overflow-y: auto;
+}
+
+/* Controls */
+.btn-primary {
+  background: var(--blue); color: white; border: none; padding: 12px 24px;
+  font-weight: bold; cursor: pointer; border-radius: 4px;
+}
+
+.scan-line {
+  position: absolute; width: 100%; height: 2px; background: var(--blue);
+  box-shadow: 0 0 15px var(--blue); top: 0; animation: scan 2s linear infinite;
+}
+
+/* ... 기존 변수 설정 동일 ... */
+
+.hmi-container {
+  width: 95vw; max-width: 1400px;
+  /* 고정 높이를 설정하여 화면 전체 크기가 변하지 않게 함 */
+  height: 800px; 
+  display: grid; grid-template-columns: 1fr 350px; grid-template-rows: 70px 1fr 150px;
+  gap: 20px; padding: 20px; box-sizing: border-box;
+}
+
+/* 1. 이미지 크기 고정: 이미지가 아무리 커도 이 영역을 벗어나지 않음 */
+.monitor-panel {
+  grid-column: 1; grid-row: 2;
+  background: #111; border: 1px solid var(--border);
+  position: relative; overflow: hidden;
+  display: flex; justify-content: center; align-items: center;
+  /* 핵심: 내부 이미지가 패널을 키우지 못하도록 설정 */
+  height: 100%; width: 100%; 
+}
+
+.monitor-panel img {
+  /* 핵심: 원본 비율은 유지하되 패널 크기에 맞춤 */
+  max-width: 100%; max-height: 100%; 
+  object-fit: contain; 
+}
+
+/* 다시 넣기 버튼 스타일 */
+.re-scan-overlay {
+  position: absolute; top: 20px; right: 20px; z-index: 10;
+}
+
+.btn-secondary {
+  background: rgba(37, 99, 235, 0.9); color: white; border: none;
+  padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 0.8rem;
+}
+
+@keyframes scan { from { top: 0; } to { top: 100%; } }

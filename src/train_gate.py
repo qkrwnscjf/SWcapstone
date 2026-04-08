@@ -723,9 +723,9 @@ def main() -> None:
     mlflow_cfg = cfg.get("mlflow", {})
     tracking_uri = mlflow_cfg.get("tracking_uri", "mlruns")
     if not tracking_uri.startswith("file://") and not tracking_uri.startswith("http"):
-        tracking_uri = f"file://{PROJECT_ROOT / tracking_uri}"
+        abs_path = (PROJECT_ROOT / tracking_uri).resolve()
+        tracking_uri = abs_path.as_uri()
     mlflow.set_tracking_uri(tracking_uri)
-    #mlflow.set_tracking_uri("file:///content/mlruns")
 
     experiment_name = mlflow_cfg.get("experiment_name", "surface_defect_detection")
     experiment_name = f"{experiment_name}_gate_round{rnd}"

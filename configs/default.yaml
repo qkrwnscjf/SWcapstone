@@ -4,8 +4,8 @@ seed: 42
 
 # Data paths
 data:
-  base_dir: "/app/data/dataset_type/dataset_type"
-  splits_dir: "/app/splits"
+  base_dir: "C:/ERICA/4-1/Capstone/final_dataset/dataset_type"
+  splits_dir: "C:/ERICA/4-1/Capstone/SWcapstone/SWcapstone/splits"
 
 # Gate model config
 gate:
@@ -71,6 +71,6 @@ mlflow:
 
 # Training
 training:
-  device: "mps"  # mps | cpu | cuda
+  device: "cuda"  # mps | cpu | cuda
   num_workers: 0  # 0 for macOS compatibility
   pin_memory: false

@@ -620,8 +620,12 @@ class PatchCoreModel:
 
         # 2. 내부 변수 할당 (KeyError 방지 로직)
         # memory_bank가 coreset이라는 이름으로 저장되어 있을 수도 있으니 둘 다 체크
-        model._memory_bank = state.get("memory_bank", state.get("coreset", None))
-        
+        raw_bank = state.get("memory_bank", state.get("coreset", None))
+        # torch.Tensor인 경우 numpy로 변환 (sklearn 호환)
+        if raw_bank is not None and hasattr(raw_bank, "cpu"):
+            raw_bank = raw_bank.cpu().numpy()
+        model._memory_bank = raw_bank
+
         # 특징 맵 크기 및 임베딩 차원 (PatchCore ResNet18 기본값: 28, 28, 448)
         model._feature_map_h = state.get("feature_map_h", 28)
         model._feature_map_w = state.get("feature_map_w", 28)

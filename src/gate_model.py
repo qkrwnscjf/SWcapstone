@@ -776,32 +776,95 @@ class GateModel:
         backbone_name = payload.get("backbone_name", "efficientnet_b0")
         instance = cls(backbone=backbone_name, pretrained=False, device=str(dev))
 
-        # --- 가중치 이름표(Key) 강제 매칭 로직 시작 ---
+        # --- 가중치 키 매핑 ---
+        # train_gate.py 저장 형식: features.xxx, classifier.1.weight
+        # GateModel 구조: model = Sequential(feature_extractor[0], head[1])
+        # 따라서: features.xxx → 0.features.xxx
+        #         classifier.N.xxx → 1.N.xxx  (head는 model[1])
         state_dict = payload["model_state_dict"]
         new_state_dict = {}
-        
         for k, v in state_dict.items():
-            # 만약 키가 'features'로 시작하면 앞에 '0.'을 붙여서 '0.features'로 만듭니다.
-            if k.startswith("features") or k.startswith("classifier"):
+            if k.startswith("features"):
                 new_key = f"0.{k}"
+            elif k.startswith("classifier"):
+                # "classifier.1.weight" → "1.1.weight"
+                sub_key = k[len("classifier."):]
+                new_key = f"1.{sub_key}"
             else:
                 new_key = k
             new_state_dict[new_key] = v
-        
-        # 이름표가 수정된 new_state_dict를 주입합니다.
-        # strict=False를 함께 사용하여 혹시 모를 미세한 차이도 허용합니다.
         instance.model.load_state_dict(new_state_dict, strict=False)
-        # --- 가중치 이름표(Key) 강제 매칭 로직 끝 ---
+        # --- 키 매핑 끝 ---
 
         instance.threshold = payload.get("threshold", 0.5)
         instance.training_history = payload.get("training_history", [])
 
+        # calibrator 로드 (1) .pt 내부에 저장된 경우
         if "calibrator_bytes" in payload:
             import pickle
             instance.calibrator = pickle.loads(payload["calibrator_bytes"])
             logger.info(
-                "Loaded calibrator: %s", payload.get("calibrator_type", "unknown")
+                "Loaded calibrator from .pt: %s", payload.get("calibrator_type", "unknown")
             )
+        else:
+            # calibrator 로드 (2) 별도 _calibrator.pkl 파일이 있는 경우 (train_gate.py 형식)
+            import pickle
+            import io
+            from sklearn.isotonic import IsotonicRegression as _IR
+            from sklearn.linear_model import LogisticRegression as _LR
+
+            # train_gate.py가 __main__ 컨텍스트에서 저장했으므로 래퍼 클래스를 여기서 재정의
+            class _IsotonicCalibrator:
+                def __init__(self):
+                    self.ir = _IR(out_of_bounds="clip")
+                def fit(self, probs, labels):
+                    self.ir.fit(probs, labels)
+                def predict_proba(self, probs):
+                    return self.ir.predict(probs)
+
+            class _PlattCalibrator:
+                def __init__(self):
+                    self.lr = _LR(C=1e10, solver="lbfgs", max_iter=1000)
+                def fit(self, probs, labels):
+                    self.lr.fit(probs.reshape(-1, 1), labels)
+                def predict_proba(self, probs):
+                    return self.lr.predict_proba(probs.reshape(-1, 1))[:, 1]
+
+            class _SafeUnpickler(pickle.Unpickler):
+                """__main__에 저장된 train_gate 캘리브레이터 클래스를 안전하게 복원"""
+                _CLASS_MAP = {
+                    ("__main__", "IsotonicCalibrator"): _IsotonicCalibrator,
+                    ("__main__", "PlattCalibrator"): _PlattCalibrator,
+                }
+                def find_class(self, module, name):
+                    mapped = self._CLASS_MAP.get((module, name))
+                    if mapped is not None:
+                        return mapped
+                    return super().find_class(module, name)
+
+            cal_stem = Path(path).stem.replace("_gate", "_calibrator")
+            cal_path = Path(path).parent / f"{cal_stem}.pkl"
+            if cal_path.exists():
+                with open(cal_path, "rb") as _f:
+                    cal_data = _SafeUnpickler(_f).load()
+                inner = cal_data.get("calibrator") if isinstance(cal_data, dict) else cal_data
+                # 래퍼에서 sklearn 객체 추출
+                if hasattr(inner, "ir"):
+                    instance.calibrator = inner.ir
+                    logger.info("Loaded IsotonicRegression calibrator from %s", cal_path)
+                elif hasattr(inner, "lr"):
+                    class _PlattAdapter:
+                        def __init__(self, lr_model):
+                            self._lr = lr_model
+                        def predict(self, X):
+                            return self._lr.predict_proba(
+                                np.array(X).reshape(-1, 1)
+                            )[:, 1]
+                    instance.calibrator = _PlattAdapter(inner.lr)
+                    logger.info("Loaded Platt calibrator from %s", cal_path)
+                else:
+                    instance.calibrator = inner
+                    logger.info("Loaded calibrator from %s", cal_path)
 
         logger.info("Gate model loaded from %s (backbone=%s)", path, backbone_name)
         return instance

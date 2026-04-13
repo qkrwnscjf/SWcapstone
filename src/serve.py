@@ -2,29 +2,21 @@
 """
 FastAPI serving endpoint implementing the Gate-Heatmap cascade logic.
 
-Cascade decision flow:
-    1. Gate model outputs p_gate(anomaly) in [0, 1].
-    2. If p_gate >= T_high  -> call Heatmap model  (likely anomaly).
-    3. If p_gate <= T_low   -> normal exit          (confident normal).
-    4. Else (uncertain zone) -> call Heatmap model.
-    5. Override: always call Heatmap if any override flag is active
-       (quality_low, drift_suspected, critical_line).
+핵심 수정 사항
+-------------
+1. GateModel.load() 사용 안 함
+   -> train_gate.py의 build_gate_model()과 동일한 구조로 직접 로드
 
-Endpoints:
-    POST /predict   - image upload -> JSON prediction
-    GET  /health    - health check
-    GET  /metrics   - runtime statistics
+2. gate checkpoint 안의 T_low / T_high 사용
+   -> 서빙에서 하드코딩 threshold 제거
 
-Environment variables / config:
-    CASCADE_T_LOW           (default 0.3)
-    CASCADE_T_HIGH          (default 0.7)
-    OVERRIDE_QUALITY_LOW    (default false)
-    OVERRIDE_DRIFT_SUSPECTED(default false)
-    OVERRIDE_CRITICAL_LINE  (default false)
-    GATE_MODEL_PATH         (default models/gate_model.pt)
-    HEATMAP_MODEL_PATH      (default models/heatmap_model.pt)
-    SERVE_HOST              (default 0.0.0.0)
-    SERVE_PORT              (default 8000)
+3. calibrator(.pkl) 자동 로드
+   -> 학습 시 저장한 calibration 반영
+
+4. heatmap 출력 계약 통일
+   -> PatchCoreModel.predict() 결과(dict)를 그대로 받아 anomaly_score / overlay 사용
+
+5. Gate score / threshold / call 여부 로그 강화
 """
 
 from __future__ import annotations
@@ -32,43 +24,47 @@ from __future__ import annotations
 import io
 import os
 import time
+import pickle
 import logging
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 import numpy as np
 import torch
+import torch.nn as nn
 from PIL import Image
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import JSONResponse
-from torchvision import transforms
-
-# ---------------------------------------------------------------------------
-# Project imports -- these modules are expected to expose:
-#   gate_model.load_gate_model(path, device) -> nn.Module
-#   gate_model.gate_predict(model, tensor)   -> float  (p_anomaly)
-#   heatmap_model.load_heatmap_model(path, device) -> object
-#   heatmap_model.heatmap_predict(model, tensor)   -> float  (anomaly score)
-# ---------------------------------------------------------------------------
-#from src.gate_model import load_gate_model, gate_predict
-#from src.heatmap_model import load_heatmap_model, heatmap_predict
-
-from src.gate_model import GateModel
-
-def gate_predict(model, image_tensor):
-    return model.predict(image_tensor)
+from fastapi.middleware.cors import CORSMiddleware
+from torchvision import transforms, models
 
 from src.heatmap_model import PatchCoreModel
 
-def heatmap_predict(model, image_tensor):
-    """PatchCoreModel 클래스와 기존의 heatmap_predict 호출을 연결"""
-    # PatchCore 모델의 추론 메서드가 predict인지 확인 후 맞춰주세요.
-    # 보통 score만 반환하도록 구현되어 있을 것입니다.
-    return model.predict(image_tensor)
+from sklearn.linear_model import LogisticRegression
+from sklearn.isotonic import IsotonicRegression
 
-#추가
-from fastapi.middleware.cors import CORSMiddleware
 
+class PlattCalibrator:
+    def __init__(self) -> None:
+        self.lr = LogisticRegression(C=1e10, solver="lbfgs", max_iter=1000)
+
+    def fit(self, probs, labels) -> None:
+        self.lr.fit(probs.reshape(-1, 1), labels)
+
+    def predict_proba(self, probs):
+        return self.lr.predict_proba(probs.reshape(-1, 1))[:, 1]
+
+
+class IsotonicCalibrator:
+    def __init__(self) -> None:
+        self.ir = IsotonicRegression(out_of_bounds="clip")
+
+    def fit(self, probs, labels) -> None:
+        self.ir.fit(probs, labels)
+
+    def predict_proba(self, probs):
+        return self.ir.predict(probs)
+    
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -79,7 +75,7 @@ logging.basicConfig(
 logger = logging.getLogger("cascade_serve")
 
 # ---------------------------------------------------------------------------
-# Configuration helpers
+# Paths / env helpers
 # ---------------------------------------------------------------------------
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -98,22 +94,19 @@ def _env_str(key: str, default: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Cascade configuration (read once at import / startup)
+# Override flags
 # ---------------------------------------------------------------------------
-#T_LOW: float = _env_float("CASCADE_T_LOW", 0.3)
-#T_HIGH: float = _env_float("CASCADE_T_HIGH", 0.7)
-T_LOW: float = _env_float("CASCADE_T_LOW", 0.1)
-T_HIGH: float = _env_float("CASCADE_T_HIGH", 0.5)
-
 OVERRIDE_QUALITY_LOW: bool = _env_bool("OVERRIDE_QUALITY_LOW", False)
 OVERRIDE_DRIFT_SUSPECTED: bool = _env_bool("OVERRIDE_DRIFT_SUSPECTED", False)
 OVERRIDE_CRITICAL_LINE: bool = _env_bool("OVERRIDE_CRITICAL_LINE", False)
 
 GATE_MODEL_PATH: str = _env_str(
-    "GATE_MODEL_PATH", str(PROJECT_ROOT / "models" / "gate_model.pt")
+    "GATE_MODEL_PATH",
+    str(PROJECT_ROOT / "models" / "round1_effnetb0_gate.pt"),
 )
 HEATMAP_MODEL_PATH: str = _env_str(
-    "HEATMAP_MODEL_PATH", str(PROJECT_ROOT / "models" / "heatmap_model.pt")
+    "HEATMAP_MODEL_PATH",
+    str(PROJECT_ROOT / "models" / "round1_patchcore_r18_patchcore.pt"),
 )
 
 DEVICE = torch.device(
@@ -122,30 +115,205 @@ DEVICE = torch.device(
 )
 
 # ---------------------------------------------------------------------------
-# Image preprocessing (must match training pipeline)
+# Runtime thresholds
+#   실제 값은 startup에서 gate checkpoint로부터 덮어씀
+# ---------------------------------------------------------------------------
+T_LOW: float = 0.3
+T_HIGH: float = 0.7
+
+# ---------------------------------------------------------------------------
+# Image preprocessing
+#   기본값 224. startup에서 gate checkpoint의 input_size를 반영해 갱신 가능
 # ---------------------------------------------------------------------------
 INPUT_SIZE = 224
-_preprocess = transforms.Compose([
-    transforms.Resize((INPUT_SIZE, INPUT_SIZE)),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                         std=[0.229, 0.224, 0.225]),
-])
+
+
+def build_preprocess(input_size: int) -> transforms.Compose:
+    return transforms.Compose([
+        transforms.Resize((input_size, input_size)),
+        transforms.ToTensor(),
+        transforms.Normalize(
+            mean=[0.485, 0.456, 0.406],
+            std=[0.229, 0.224, 0.225],
+        ),
+    ])
+
+
+_preprocess = build_preprocess(INPUT_SIZE)
 
 
 def preprocess_image(image_bytes: bytes) -> torch.Tensor:
     """Read raw bytes -> PIL -> preprocessed tensor [1, C, H, W]."""
     img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    tensor = _preprocess(img).unsqueeze(0)  # [1, 3, 224, 224]
+    tensor = _preprocess(img).unsqueeze(0)
     return tensor.to(DEVICE)
+
+
+# ---------------------------------------------------------------------------
+# Gate model builder (train_gate.py와 동일 구조)
+# ---------------------------------------------------------------------------
+def build_gate_model(gate_name: str, num_classes: int = 1) -> nn.Module:
+    if gate_name == "effnetb0":
+        model = models.efficientnet_b0(
+            weights=models.EfficientNet_B0_Weights.DEFAULT
+        )
+        in_features = model.classifier[1].in_features
+        model.classifier = nn.Sequential(
+            nn.Dropout(p=0.2, inplace=True),
+            nn.Linear(in_features, num_classes),
+        )
+    elif gate_name == "mnv3_large":
+        model = models.mobilenet_v3_large(
+            weights=models.MobileNet_V3_Large_Weights.DEFAULT
+        )
+        in_features = model.classifier[0].in_features
+        model.classifier = nn.Sequential(
+            nn.Linear(in_features, 1280),
+            nn.Hardswish(inplace=True),
+            nn.Dropout(p=0.2, inplace=True),
+            nn.Linear(1280, num_classes),
+        )
+    else:
+        raise ValueError(f"Unsupported gate model: {gate_name}")
+
+    return model
+
+def load_gate_checkpoint(model_path: str, device: torch.device) -> Dict[str, Any]:
+    """train_gate.py에서 저장한 checkpoint를 직접 로드."""
+    ckpt = torch.load(model_path, map_location=device, weights_only=False)
+
+    gate_name = ckpt.get("gate_name")
+    if gate_name is None:
+        raise ValueError(f"'gate_name' not found in checkpoint: {model_path}")
+
+    model = build_gate_model(gate_name, num_classes=1)
+
+    try:
+        model.load_state_dict(ckpt["model_state_dict"], strict=True)
+        logger.info("Gate checkpoint loaded with strict=True")
+    except Exception as e:
+        logger.warning("strict=True load failed: %s", e)
+        missing, unexpected = model.load_state_dict(
+            ckpt["model_state_dict"], strict=False
+        )
+        logger.warning("Gate load missing keys: %s", missing)
+        logger.warning("Gate load unexpected keys: %s", unexpected)
+
+    model.to(device)
+    model.eval()
+
+    bundle = {
+        "model": model,
+        "gate_name": gate_name,
+        "backbone": ckpt.get("backbone", gate_name),
+        "input_size": int(ckpt.get("input_size", 224)),
+        "T_low": float(ckpt.get("T_low", 0.3)),
+        "T_high": float(ckpt.get("T_high", 0.7)),
+        "checkpoint_path": model_path,
+    }
+    return bundle
+
+def load_gate_calibrator(cal_path: Optional[str]) -> Optional[Any]:
+    if cal_path is None:
+        logger.info("No calibrator file found for gate model.")
+        return None
+
+    try:
+        with open(cal_path, "rb") as f:
+            obj = pickle.load(f)
+
+        calibrator = obj.get("calibrator", None)
+        method = obj.get("method", "unknown")
+        logger.info("Loaded gate calibrator from %s (method=%s)", cal_path, method)
+        return calibrator
+
+    except Exception as e:
+        logger.warning(
+            "Failed to load gate calibrator from %s. Proceeding without calibration. Error: %s",
+            cal_path,
+            e,
+        )
+        return None
+
+def find_calibrator_path(gate_model_path: str) -> Optional[str]:
+    """
+    예:
+      round1_effnetb0_gate.pt -> round1_effnetb0_calibrator.pkl
+    """
+    gate_path = Path(gate_model_path)
+    stem = gate_path.stem
+
+    if stem.endswith("_gate"):
+        cal_name = stem[:-5] + "_calibrator.pkl"
+    else:
+        cal_name = stem + "_calibrator.pkl"
+
+    cal_path = gate_path.with_name(cal_name)
+    if cal_path.exists():
+        return str(cal_path)
+    return None
+
+
+@torch.no_grad()
+def gate_predict(
+    bundle: Dict[str, Any],
+    image_tensor: torch.Tensor,
+    calibrator: Optional[Any] = None,
+) -> float:
+    """Return calibrated p_gate(anomaly) if calibrator exists."""
+    model = bundle["model"]
+
+    if image_tensor.dim() == 3:
+        image_tensor = image_tensor.unsqueeze(0)
+
+    model_device = next(model.parameters()).device
+    image_tensor = image_tensor.to(model_device)
+
+    logits = model(image_tensor).squeeze(-1)
+    prob = torch.sigmoid(logits).item()
+
+    if calibrator is not None:
+        prob_arr = np.array([prob], dtype=np.float32)
+
+        # custom PlattCalibrator / IsotonicCalibrator 둘 다 predict_proba 제공
+        if hasattr(calibrator, "predict_proba"):
+            out = calibrator.predict_proba(prob_arr)
+            out = np.asarray(out)
+
+            # sklearn logistic 계열이면 (N, 2)
+            if out.ndim == 2:
+                prob = float(out[0, 1])
+            else:
+                prob = float(out[0])
+
+        # 혹시 직접 sklearn isotonic object가 들어온 경우
+        elif hasattr(calibrator, "predict"):
+            prob = float(calibrator.predict(prob_arr)[0])
+
+        prob = float(np.clip(prob, 0.0, 1.0))
+
+    return prob
+
+
+# ---------------------------------------------------------------------------
+# Heatmap inference contract
+# ---------------------------------------------------------------------------
+def heatmap_predict(model: PatchCoreModel, image_tensor: torch.Tensor):
+    """
+    PatchCoreModel.predict() 결과(dict)를 그대로 반환.
+    기대 key:
+      - anomaly_score
+      - raw_score_heatmap
+      - normalized_score_heatmap
+      - heatmap_overlay
+    """
+    return model.predict(image_tensor)
 
 
 # ---------------------------------------------------------------------------
 # Runtime metrics accumulator
 # ---------------------------------------------------------------------------
 class _Metrics:
-    """Thread-safe (GIL-level) runtime statistics."""
-
     def __init__(self) -> None:
         self.total_predictions: int = 0
         self.heatmap_calls: int = 0
@@ -153,7 +321,6 @@ class _Metrics:
         self.heatmap_latency_sum_ms: float = 0.0
         self.total_latency_sum_ms: float = 0.0
 
-    # -- mutators ----------------------------------------------------------
     def record(
         self,
         called_heatmap: bool,
@@ -168,7 +335,6 @@ class _Metrics:
         self.heatmap_latency_sum_ms += heatmap_latency_ms
         self.total_latency_sum_ms += total_latency_ms
 
-    # -- queries -----------------------------------------------------------
     @property
     def heatmap_call_rate(self) -> float:
         if self.total_predictions == 0:
@@ -209,35 +375,35 @@ metrics = _Metrics()
 # ---------------------------------------------------------------------------
 # Cascade decision logic
 # ---------------------------------------------------------------------------
-
 def _should_call_heatmap(p_gate: float) -> bool:
-    """Return True if the heatmap stage should be invoked."""
-    # Override flags take precedence
+    """
+    Override가 있으면 항상 heatmap.
+    p_gate <= T_LOW 이면 confident normal -> skip.
+    그 외에는 heatmap 호출.
+    """
     if OVERRIDE_QUALITY_LOW or OVERRIDE_DRIFT_SUSPECTED or OVERRIDE_CRITICAL_LINE:
         return True
-    # Confident normal -> skip heatmap
+
     if p_gate <= T_LOW:
         return False
-    # Confident anomaly or uncertain zone -> call heatmap
-    return True  # p_gate > T_LOW (covers both uncertain and >= T_HIGH)
+
+    if p_gate >= T_HIGH:
+        return True
+
+    # uncertain zone
+    return True
 
 
 def _cascade_decision(p_gate: float, heatmap_score: Optional[float]) -> str:
     """
-    Produce a human-readable decision string.
-
-    Returns one of:
-        "normal"  - gate-only exit, predicted normal
-        "anomaly" - heatmap confirmed anomaly
-        "normal (heatmap)" - heatmap overrode gate, predicted normal
+    Returns:
+        "normal"
+        "anomaly"
+        "normal (heatmap)"
     """
     if heatmap_score is None:
-        # Gate-only exit
         return "normal"
 
-    # When heatmap was called, use the heatmap score as the final arbiter.
-    # The heatmap anomaly threshold is conventionally 0.5 for a calibrated
-    # score; adjust as needed for your PatchCore calibration.
     HEATMAP_THRESHOLD = 0.5
     if heatmap_score >= HEATMAP_THRESHOLD:
         return "anomaly"
@@ -245,44 +411,61 @@ def _cascade_decision(p_gate: float, heatmap_score: Optional[float]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# FastAPI application
+# FastAPI app
 # ---------------------------------------------------------------------------
 app = FastAPI(
     title="Cascade Anomaly Detection Service",
     description="Gate -> Heatmap cascade serving endpoint",
-    version="1.0.0",
+    version="2.0.0",
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],      # 모든 출처 허용
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],      # GET, POST 등 모든 메소드 허용
-    allow_headers=["*"],      # 모든 헤더 허용
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# -- model singletons (loaded at startup) ----------------------------------
-_gate_model: Any = None
-_heatmap_model: Any = None
+_gate_bundle: Optional[Dict[str, Any]] = None
+_gate_calibrator: Optional[Any] = None
+_heatmap_model: Optional[PatchCoreModel] = None
 
 
 @app.on_event("startup")
 async def _load_models() -> None:
-    global _gate_model, _heatmap_model
+    global _gate_bundle, _gate_calibrator, _heatmap_model
+    global T_LOW, T_HIGH, INPUT_SIZE, _preprocess
 
     logger.info("Loading gate model from %s", GATE_MODEL_PATH)
-    _gate_model = GateModel.load(GATE_MODEL_PATH, DEVICE)
-    #_gate_model = load_gate_model(GATE_MODEL_PATH, DEVICE)
-    logger.info("Gate model loaded on %s", DEVICE)
+    _gate_bundle = load_gate_checkpoint(GATE_MODEL_PATH, DEVICE)
+
+    # checkpoint에 저장된 input size 반영
+    INPUT_SIZE = int(_gate_bundle["input_size"])
+    _preprocess = build_preprocess(INPUT_SIZE)
+
+    cal_path = find_calibrator_path(GATE_MODEL_PATH)
+    _gate_calibrator = load_gate_calibrator(cal_path)
+
+    # checkpoint에서 추천 threshold 반영
+    T_LOW = float(_gate_bundle["T_low"])
+    T_HIGH = float(_gate_bundle["T_high"])
+
+    logger.info(
+        "Gate loaded: gate_name=%s, backbone=%s, input_size=%d, T_low=%.3f, T_high=%.3f",
+        _gate_bundle["gate_name"],
+        _gate_bundle["backbone"],
+        INPUT_SIZE,
+        T_LOW,
+        T_HIGH,
+    )
 
     logger.info("Loading heatmap model from %s", HEATMAP_MODEL_PATH)
-    _heatmap_model = PatchCoreModel.load(HEATMAP_MODEL_PATH, DEVICE)
-    #_heatmap_model = load_heatmap_model(HEATMAP_MODEL_PATH, DEVICE)
+    _heatmap_model = PatchCoreModel.load(str(HEATMAP_MODEL_PATH), device=str(DEVICE))
     logger.info("Heatmap model loaded on %s", DEVICE)
 
     logger.info(
-        "Cascade config  T_low=%.3f  T_high=%.3f  overrides=[quality_low=%s, "
-        "drift_suspected=%s, critical_line=%s]",
+        "Cascade config  T_low=%.3f  T_high=%.3f  overrides=[quality_low=%s, drift_suspected=%s, critical_line=%s]",
         T_LOW,
         T_HIGH,
         OVERRIDE_QUALITY_LOW,
@@ -297,15 +480,23 @@ async def _load_models() -> None:
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
     """
-    Accept an image upload, run the cascade, return JSON result.
-
     Response schema:
     {
-        "gate_score": float,         // p_gate(anomaly)
-        "decision": str,             // "normal" | "anomaly" | "normal (heatmap)"
+        "gate_score": float,
+        "decision": str,
         "heatmap_called": bool,
-        "heatmap_score": float|null, // only when heatmap was invoked
+        "heatmap_score": float|null,
+        "heatmap_data": list|null,
         "override_active": bool,
+        "thresholds": {
+            "T_low": float,
+            "T_high": float
+        },
+        "mlflow_info": {
+            "gate_name": str,
+            "backbone": str,
+            "input_size": int
+        },
         "latency": {
             "gate_latency_ms": float,
             "heatmap_latency_ms": float,
@@ -328,8 +519,9 @@ async def predict(file: UploadFile = File(...)):
     # --- gate inference ---------------------------------------------------
     t_gate_start = time.perf_counter()
     try:
-        #p_gate: float = gate_predict(_gate_model, tensor)
-        p_gate: float = _gate_model.predict(tensor)
+        if _gate_bundle is None:
+            raise RuntimeError("Gate model is not loaded")
+        p_gate = gate_predict(_gate_bundle, tensor, _gate_calibrator)
     except Exception as exc:
         raise HTTPException(
             status_code=500,
@@ -348,11 +540,57 @@ async def predict(file: UploadFile = File(...)):
 
     heatmap_score: Optional[float] = None
     heatmap_latency_ms: float = 0.0
-    """
+    heatmap_data_for_ui: Optional[list] = None
+
     if call_heatmap:
         t_hm_start = time.perf_counter()
         try:
-            heatmap_score = heatmap_predict(_heatmap_model, tensor)
+            if _heatmap_model is None:
+                raise RuntimeError("Heatmap model is not loaded")
+
+            hm_result = heatmap_predict(_heatmap_model, tensor)
+
+            if isinstance(hm_result, dict):
+                # 1) anomaly score
+                heatmap_score = float(
+                    hm_result.get("anomaly_score", hm_result.get("score", 0.0))
+                )
+
+                # 2) UI용 overlay 우선
+                overlay = hm_result.get("heatmap_overlay", None)
+                if overlay is not None:
+                    if torch.is_tensor(overlay):
+                        heatmap_data_for_ui = overlay.detach().cpu().numpy().tolist()
+                    elif isinstance(overlay, np.ndarray):
+                        heatmap_data_for_ui = overlay.tolist()
+                    else:
+                        try:
+                            heatmap_data_for_ui = list(overlay)
+                        except Exception:
+                            heatmap_data_for_ui = None
+
+                # 3) overlay 없으면 normalized heatmap fallback
+                if heatmap_data_for_ui is None:
+                    norm_map = hm_result.get("normalized_score_heatmap", None)
+                    if norm_map is not None:
+                        if torch.is_tensor(norm_map):
+                            heatmap_data_for_ui = norm_map.detach().cpu().numpy().tolist()
+                        elif isinstance(norm_map, np.ndarray):
+                            heatmap_data_for_ui = norm_map.tolist()
+
+                # 4) raw heatmap fallback
+                if heatmap_data_for_ui is None:
+                    raw_map = hm_result.get("raw_score_heatmap", None)
+                    if raw_map is not None:
+                        if torch.is_tensor(raw_map):
+                            heatmap_data_for_ui = raw_map.detach().cpu().numpy().tolist()
+                        elif isinstance(raw_map, np.ndarray):
+                            heatmap_data_for_ui = raw_map.tolist()
+
+            else:
+                # 혹시 float만 반환하는 구현이라면
+                heatmap_score = float(hm_result)
+
         except Exception as exc:
             raise HTTPException(
                 status_code=500,
@@ -361,85 +599,13 @@ async def predict(file: UploadFile = File(...)):
         t_hm_end = time.perf_counter()
         heatmap_latency_ms = (t_hm_end - t_hm_start) * 1000.0
 
+    # --- final decision ---------------------------------------------------
     decision = _cascade_decision(p_gate, heatmap_score)
 
     t_end = time.perf_counter()
     total_latency_ms = (t_end - t_start) * 1000.0
-    """
-    # --- cascade decision (히트맵 결과 백엔드 전송 로직) (2/22 수정)
-    heatmap_data_for_ui: Optional[list] = None 
 
-    if call_heatmap:
-        t_hm_start = time.perf_counter()
-        try:
-            hm_result = heatmap_predict(_heatmap_model, tensor)
-            
-            # 터미널 로그에서 확인한 dict 구조 분석 및 추출
-            if isinstance(hm_result, dict):
-                # 1. 점수 추출
-                heatmap_score = hm_result.get("score") or hm_result.get("anomaly_score") or 0.0
-                
-                # 2. 4채널(RGBA) 배열 찾기 
-                for key, value in hm_result.items():
-                    
-                    if hasattr(value, "shape") and len(value.shape) == 3 and value.shape[2] == 4:
-                        if torch.is_tensor(value):
-                            heatmap_data_for_ui = value.detach().cpu().numpy().tolist()
-                        elif isinstance(value, np.ndarray):
-                            heatmap_data_for_ui = value.tolist()
-                        else:
-                            heatmap_data_for_ui = list(value)
-                        logger.info(f"Found RGBA heatmap data in key: '{key}'")
-                        break
-                
-                
-                if heatmap_data_for_ui is None:
-                    raw_heatmap = hm_result.get("heatmap") or hm_result.get("anomaly_map")
-                    if raw_heatmap is not None:
-                        heatmap_data_for_ui = raw_heatmap.tolist() if hasattr(raw_heatmap, "tolist") else raw_heatmap
-            else:
-                heatmap_score = hm_result
-                
-        except Exception as exc:
-            logger.error(f"Heatmap inference failed: {exc}")
-            
-        t_hm_end = time.perf_counter()
-        heatmap_latency_ms = (t_hm_end - t_hm_start) * 1000.0
-    """
-    heatmap_array_list: Optional[list] = None # 히트맵 배열 저장용 변수 추가 (2/22)
-
-    if call_heatmap:
-        t_hm_start = time.perf_counter()
-        try:
-            # heatmap_predict가 반환하는 값 전체
-            hm_result = heatmap_predict(_heatmap_model, tensor)
-            
-            logger.info(f"DEBUG: hm_result type={type(hm_result)}, value={hm_result}")
-            
-            # 만약 hm_result가 딕셔너리라면 score만 추출하고, 아니면 그대로 사용
-            if isinstance(hm_result, dict):
-                #heatmap_score = hm_result.get("score", 0.0)
-                # 나중에 React에 전달하기 위해 히트맵 배열도 따로 저장
-                heatmap_score = hm_result.get("score") or hm_result.get("anomaly_score") or 0.0
-                heatmap_array = hm_result.get("heatmap", None)
-            else:
-                heatmap_score = hm_result
-        except Exception as exc:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Heatmap model inference failed: {exc}",
-            )
-        t_hm_end = time.perf_counter()
-        heatmap_latency_ms = (t_hm_end - t_hm_start) * 1000.0
-        """
-
-    # --- record metrics ---------------------------------------------------
-    
-    decision = _cascade_decision(p_gate, heatmap_score)
-
-    t_end = time.perf_counter()
-    total_latency_ms = (t_end - t_start) * 1000.0  # 초를 밀리초(ms)로 변환
-
+    # --- metrics ----------------------------------------------------------
     metrics.record(
         called_heatmap=call_heatmap,
         gate_latency_ms=gate_latency_ms,
@@ -449,46 +615,37 @@ async def predict(file: UploadFile = File(...)):
 
     # --- log --------------------------------------------------------------
     logger.info(
-        "predict  gate=%.4f  heatmap=%s  decision=%s  "
-        "gate_ms=%.1f  hm_ms=%.1f  total_ms=%.1f",
+        "predict  gate=%.6f  T_low=%.3f  T_high=%.3f  heatmap_called=%s  heatmap=%s  decision=%s  gate_ms=%.2f  hm_ms=%.2f  total_ms=%.2f",
         p_gate,
-        f"{heatmap_score:.4f}" if heatmap_score is not None else "N/A",
+        T_LOW,
+        T_HIGH,
+        call_heatmap,
+        f"{heatmap_score:.6f}" if heatmap_score is not None else "N/A",
         decision,
         gate_latency_ms,
         heatmap_latency_ms,
         total_latency_ms,
     )
-    """
+
     return JSONResponse(
         content={
             "gate_score": round(float(p_gate), 6),
             "decision": decision,
             "heatmap_called": call_heatmap,
             "heatmap_score": (
-                round(float(heatmap_score), 6) if heatmap_score is not None else None
+                round(float(heatmap_score), 6)
+                if heatmap_score is not None else None
             ),
+            "heatmap_data": heatmap_data_for_ui,
             "override_active": override_active,
-            "latency": {
-                "gate_latency_ms": round(gate_latency_ms, 2),
-                "heatmap_latency_ms": round(heatmap_latency_ms, 2),
-                "total_latency_ms": round(total_latency_ms, 2),
+            "thresholds": {
+                "T_low": round(float(T_LOW), 6),
+                "T_high": round(float(T_HIGH), 6),
             },
-        }
-    )
-    """
-    # --- return 부분 수정 --- (2/22)
-    return JSONResponse(
-        content={
-            "gate_score": round(float(p_gate), 6),
-            "decision": decision,
-            "heatmap_called": call_heatmap,
-            "heatmap_score": (
-                round(float(heatmap_score), 6) if heatmap_score is not None else None
-            ),
-            "heatmap_data": heatmap_data_for_ui, # null이 아닌 리스트
             "mlflow_info": {
-                "backbone": _gate_model.backbone_name,
-                "threshold": _gate_model.threshold,
+                "gate_name": _gate_bundle["gate_name"] if _gate_bundle else None,
+                "backbone": _gate_bundle["backbone"] if _gate_bundle else None,
+                "input_size": _gate_bundle["input_size"] if _gate_bundle else None,
             },
             "latency": {
                 "gate_latency_ms": round(gate_latency_ms, 2),
@@ -497,6 +654,39 @@ async def predict(file: UploadFile = File(...)):
             },
         }
     )
+
+
+# --------------------------------------------------------------------------
+# POST /predict_gate_only
+#   Gate score 분포 디버깅용
+# --------------------------------------------------------------------------
+@app.post("/predict_gate_only")
+async def predict_gate_only(file: UploadFile = File(...)):
+    try:
+        image_bytes = await file.read()
+        tensor = preprocess_image(image_bytes)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to read/preprocess image: {exc}",
+        )
+
+    try:
+        if _gate_bundle is None:
+            raise RuntimeError("Gate model is not loaded")
+        p_gate = gate_predict(_gate_bundle, tensor, _gate_calibrator)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Gate model inference failed: {exc}",
+        )
+
+    return {
+        "gate_score": round(float(p_gate), 6),
+        "T_low": round(float(T_LOW), 6),
+        "T_high": round(float(T_HIGH), 6),
+        "would_call_heatmap": _should_call_heatmap(p_gate),
+    }
 
 
 # --------------------------------------------------------------------------
@@ -504,11 +694,11 @@ async def predict(file: UploadFile = File(...)):
 # --------------------------------------------------------------------------
 @app.get("/health")
 async def health():
-    """Simple health check."""
     return {
         "status": "ok",
         "device": str(DEVICE),
-        "gate_model_loaded": _gate_model is not None,
+        "gate_model_loaded": _gate_bundle is not None,
+        "gate_calibrator_loaded": _gate_calibrator is not None,
         "heatmap_model_loaded": _heatmap_model is not None,
         "cascade_config": {
             "T_low": T_LOW,
@@ -516,6 +706,12 @@ async def health():
             "override_quality_low": OVERRIDE_QUALITY_LOW,
             "override_drift_suspected": OVERRIDE_DRIFT_SUSPECTED,
             "override_critical_line": OVERRIDE_CRITICAL_LINE,
+        },
+        "gate_info": {
+            "gate_name": _gate_bundle["gate_name"] if _gate_bundle else None,
+            "backbone": _gate_bundle["backbone"] if _gate_bundle else None,
+            "input_size": _gate_bundle["input_size"] if _gate_bundle else None,
+            "checkpoint_path": _gate_bundle["checkpoint_path"] if _gate_bundle else None,
         },
     }
 
@@ -525,12 +721,11 @@ async def health():
 # --------------------------------------------------------------------------
 @app.get("/metrics")
 async def get_metrics():
-    """Return current runtime statistics."""
     return metrics.snapshot()
 
 
 # --------------------------------------------------------------------------
-# Entrypoint (for `python -m src.serve`)
+# Entrypoint
 # --------------------------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
@@ -538,6 +733,7 @@ if __name__ == "__main__":
     host = _env_str("SERVE_HOST", "0.0.0.0")
     port = int(_env_float("SERVE_PORT", 8000))
     logger.info("Starting server on %s:%d", host, port)
+
     uvicorn.run(
         "src.serve:app",
         host=host,

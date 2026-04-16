@@ -9,6 +9,8 @@ Usage
 -----
     python src/train_gate.py --round 1 --gate effnetb0
     python src/train_gate.py --round 2 --gate mnv3_large --device cuda
+    python src/train_gate.py --round 1 --gate effnetb0 --batch_size 32 --lr 1e-4 --epochs 20
+    python src/train_gate.py --round 1 --gate effnetb0 --csv_path data/snapshot.csv
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ import pickle
 import random
 import sys
 import warnings
+import json
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -54,7 +57,7 @@ from sklearn.metrics import (
 from torch.utils.data import DataLoader, Dataset
 
 try:
-    import mlflow
+     import mlflow
 except ImportError:
     raise ImportError("mlflow is required. Install via: pip install mlflow")
 
@@ -105,8 +108,14 @@ class GateDataset(Dataset):
         self,
         csv_path: str | Path,
         transform: Optional[T.Compose] = None,
+        split: Optional[str] = None,
     ) -> None:
         self.df = pd.read_csv(csv_path)
+        # If split is provided and 'split' column exists, filter rows.
+        # This handles cases where train/val/test are in one file.
+        if split and "split" in self.df.columns:
+            self.df = self.df[self.df["split"] == split].reset_index(drop=True)
+            
         self.transform = transform
         self.label_map = {"normal": 0, "anomaly": 1}
 
@@ -442,7 +451,7 @@ def threshold_sweep(
     t_high_range: List[float],
     optimize_for: str = "recall",
     max_heatmap_call_rate: float = 0.50,
-) -> Tuple[Dict, Path]:
+) -> Tuple[Dict, pd.DataFrame]:
     """Sweep T_low / T_high and find optimal cascade thresholds.
 
     Cascade logic:
@@ -450,7 +459,7 @@ def threshold_sweep(
       p >= T_high -> predict anomaly / call heatmap
       T_low < p < T_high -> uncertain, call heatmap
 
-    Returns (best_result_dict, plot_path).
+    Returns (best_result_dict, sweep_df).
     """
     results: List[Dict] = []
 
@@ -602,6 +611,26 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Device: mps | cpu | cuda (overrides config)",
     )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        help="Batch size (overrides config)",
+    )
+    parser.add_argument(
+        "--lr",
+        type=float,
+        help="Learning rate (overrides config)",
+    )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        help="Number of epochs (overrides config)",
+    )
+    parser.add_argument(
+        "--csv_path",
+        type=str,
+        help="Path to CSV file (can contain all splits) or directory",
+    )
     return parser.parse_args()
 
 
@@ -619,9 +648,12 @@ def main() -> None:
     input_size = gate_cfg["input_size"]
     if isinstance(input_size, list):
         input_size = input_size[0]
-    batch_size = gate_cfg["batch_size"]
-    epochs = gate_cfg["epochs"]
-    lr = gate_cfg["lr"]
+        
+    # Priority: CLI > Config
+    batch_size = args.batch_size if args.batch_size is not None else gate_cfg["batch_size"]
+    epochs = args.epochs if args.epochs is not None else gate_cfg["epochs"]
+    lr = args.lr if args.lr is not None else gate_cfg["lr"]
+    
     weight_decay = gate_cfg["weight_decay"]
     scheduler_type = gate_cfg.get("scheduler", "cosine")
     pos_weight_auto = gate_cfg.get("pos_weight_auto", True)
@@ -660,14 +692,24 @@ def main() -> None:
     print("=" * 60)
 
     # ---- CSV paths ----
-    #splits_dir = Path(cfg.get("data", {}).get("splits_dir", str(SPLITS_DIR)))
-    # ---- CSV paths 수정 ----
-    # 현송님의 개인 경로가 들어있을 수 있는 cfg.get 부분을 주석 처리
-    # 강제로 프로젝트 루트 기준 splits 폴더 설정
-    splits_dir = SPLITS_DIR # 강제 지정
-    train_csv = splits_dir / f"round{rnd}_train_gate_mix.csv"
-    val_csv = splits_dir / f"round{rnd}_val_gate.csv"
-    test_csv = splits_dir / f"round{rnd}_test_gate.csv"
+    if args.csv_path:
+        csv_p = Path(args.csv_path)
+        if csv_p.is_file():
+            # If it's a single file, all splits point to it. 
+            # GateDataset will handle filtering via 'split' column.
+            train_csv = csv_p
+            val_csv = csv_p
+            test_csv = csv_p
+        else:
+            # If it's a directory, look for standard filenames
+            train_csv = csv_p / f"round{rnd}_train_gate_mix.csv"
+            val_csv = csv_p / f"round{rnd}_val_gate.csv"
+            test_csv = csv_p / f"round{rnd}_test_gate.csv"
+    else:
+        splits_dir = SPLITS_DIR 
+        train_csv = splits_dir / f"round{rnd}_train_gate_mix.csv"
+        val_csv = splits_dir / f"round{rnd}_val_gate.csv"
+        test_csv = splits_dir / f"round{rnd}_test_gate.csv"
 
     for csv_path in [train_csv, val_csv, test_csv]:
         if not csv_path.exists():
@@ -678,9 +720,9 @@ def main() -> None:
     eval_transform = get_eval_transforms(input_size)
 
     # ---- Datasets & Loaders ----
-    train_ds = GateDataset(train_csv, transform=train_transform)
-    val_ds = GateDataset(val_csv, transform=eval_transform)
-    test_ds = GateDataset(test_csv, transform=eval_transform)
+    train_ds = GateDataset(train_csv, transform=train_transform, split="train")
+    val_ds = GateDataset(val_csv, transform=eval_transform, split="val")
+    test_ds = GateDataset(test_csv, transform=eval_transform, split="test")
 
     train_dl = DataLoader(
         train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers
@@ -725,7 +767,6 @@ def main() -> None:
     if not tracking_uri.startswith("file://") and not tracking_uri.startswith("http"):
         tracking_uri = f"file://{PROJECT_ROOT / tracking_uri}"
     mlflow.set_tracking_uri(tracking_uri)
-    #mlflow.set_tracking_uri("file:///content/mlruns")
 
     experiment_name = mlflow_cfg.get("experiment_name", "surface_defect_detection")
     experiment_name = f"{experiment_name}_gate_round{rnd}"
@@ -735,7 +776,7 @@ def main() -> None:
         # Log params
         mlflow.log_param("round", rnd)
         mlflow.log_param("gate_model", args.gate)
-        mlflow.log_param("backbone", gate_cfg["backbone"])
+        mlflow.log_param("backbone", gate_cfg.get("backbone", args.gate))
         mlflow.log_param("device", device)
         mlflow.log_param("batch_size", batch_size)
         mlflow.log_param("epochs", epochs)
@@ -749,6 +790,8 @@ def main() -> None:
         mlflow.log_param("train_normal", n_neg)
         mlflow.log_param("train_anomaly", n_pos)
         mlflow.log_param("early_stopping_patience", early_stopping_patience)
+        if args.csv_path:
+            mlflow.log_param("csv_path", args.csv_path)
 
         # ---- Training loop ----
         best_val_loss = float("inf")
@@ -914,8 +957,6 @@ def main() -> None:
             )
 
             # Save threshold recommendation as JSON artifact
-            import json
-
             thr_json_path = REPORTS_DIR / f"{run_tag}_thresholds.json"
             thr_json_path.parent.mkdir(parents=True, exist_ok=True)
             with open(thr_json_path, "w") as f:
@@ -943,7 +984,7 @@ def main() -> None:
         torch.save(
             {
                 "gate_name": args.gate,
-                "backbone": gate_cfg["backbone"],
+                "backbone": gate_cfg.get("backbone", args.gate),
                 "model_state_dict": model.state_dict(),
                 "input_size": input_size,
                 "T_low": best_thresholds["T_low"],

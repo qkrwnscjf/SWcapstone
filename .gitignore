@@ -35,3 +35,4 @@ artifacts/*
 # 용량 초과로 인한 데이터셋&mlrun 기록 제외
 final_dataset/
 mlruns/
+backend/models/

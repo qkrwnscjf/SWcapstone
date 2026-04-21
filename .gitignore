@@ -1,0 +1,7 @@
+grid_split/
+grid_split.zip
+mlruns/
+.ipynb_checkpoints/
+__pycache__/
+.DS_Store
+*.pyc

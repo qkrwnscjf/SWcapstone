@@ -21,20 +21,24 @@ import { predictAnomaly } from "./api/anomaly";
 import {
   createTrainingRun,
   fetchDashboard,
+  materializeFeedbackDataset,
   promoteModel,
   rollbackDeployment,
+  saveTrainingRecipe,
   startCanary,
+  stopTrainingRun,
   uploadFeedback,
+  uploadDatasetFiles,
 } from "./api/mlops";
 import type { PredictResponse } from "./types/anomaly";
-import type { DashboardResponse, ModelVersion, TrainingRun } from "./types/mlops";
+import type { DashboardResponse, ModelVersion, TrainingRecipe, TrainingRun } from "./types/mlops";
 
 type Audience = "field" | "admin" | "summary";
 type AdminTab = "ops" | "train" | "version" | "logs";
 type LineId = "LINE-A" | "LINE-B" | "LINE-C";
 type Tone = "slate" | "blue" | "green" | "amber" | "red";
 type ViewMode = "raw" | "heatmap" | "overlay";
-type BusyAction = "train" | "canary" | "approve" | "rollback" | null;
+type BusyAction = "train" | "stop" | "canary" | "approve" | "rollback" | null;
 
 type LiveSample = {
   sampleId: string;
@@ -179,6 +183,22 @@ function pickCanaryModel(dashboard: DashboardResponse | null) {
     dashboard.model_versions.find((model) => model.status === "canary") ??
     null
   );
+}
+
+function recipeDraftFrom(recipe?: TrainingRecipe): TrainingRecipe {
+  return {
+    id: recipe?.id ?? "custom-cpu-recipe",
+    name: recipe?.name ?? "Custom CPU Recipe",
+    description: recipe?.description ?? "",
+    gate_model: recipe?.gate_model ?? "effnetb0",
+    batch_size: recipe?.batch_size ?? 8,
+    learning_rate: recipe?.learning_rate ?? 0.0003,
+    optimizer: recipe?.optimizer ?? "AdamW",
+    weight_decay: recipe?.weight_decay ?? 0,
+    scheduler: recipe?.scheduler ?? "cosine",
+    early_stopping_patience: recipe?.early_stopping_patience ?? 5,
+    default_epochs: recipe?.default_epochs ?? 3,
+  };
 }
 
 function Card({
@@ -992,14 +1012,22 @@ function OpsView({
   );
 }
 
-function TrainingRunsTable({ runs }: { runs: TrainingRun[] }) {
+function TrainingRunsTable({
+  runs,
+  selectedRunId,
+  onSelectRun,
+}: {
+  runs: TrainingRun[];
+  selectedRunId?: string;
+  onSelectRun?: (runId: string) => void;
+}) {
   return (
     <div className="min-h-0 overflow-hidden rounded-2xl border-2 border-slate-200">
       <ScrollTable>
         <table className="min-w-full text-sm">
           <thead className="sticky top-0 bg-slate-50 text-slate-600">
             <tr>
-              {["Run", "Dataset", "전략", "샘플", "상태"].map((heading) => (
+              {["Run", "Dataset", "Base", "Recipe", "진행률", "상태"].map((heading) => (
                 <th key={heading} className="px-4 py-3 text-left font-semibold">
                   {heading}
                 </th>
@@ -1008,20 +1036,39 @@ function TrainingRunsTable({ runs }: { runs: TrainingRun[] }) {
           </thead>
           <tbody>
             {runs.length ? (
-              runs.map((run) => (
-                <tr key={run.id} className="border-t border-slate-200">
-                  <td className="px-4 py-3 font-semibold">{run.id}</td>
-                  <td className="px-4 py-3">{run.dataset_version_id}</td>
-                  <td className="px-4 py-3">{run.train_strategy}</td>
-                  <td className="px-4 py-3">{run.sample_count}</td>
-                  <td className="px-4 py-3">
-                    <Badge tone={run.status === "configured" ? "blue" : "green"}>{run.status}</Badge>
-                  </td>
-                </tr>
-              ))
+              runs.map((run) => {
+                const progress = Math.min(100, Math.max(0, run.progress ?? 0));
+                const selected = selectedRunId === run.id;
+
+                return (
+                  <tr
+                    key={run.id}
+                    onClick={() => onSelectRun?.(run.id)}
+                    className={cls(
+                      "border-t border-slate-200",
+                      onSelectRun ? "cursor-pointer transition hover:bg-slate-50" : "",
+                      selected ? "bg-blue-50" : ""
+                    )}
+                  >
+                    <td className="px-4 py-3 font-semibold">{run.id}</td>
+                    <td className="px-4 py-3">{run.dataset_version_id}</td>
+                    <td className="px-4 py-3">{run.base_model_version_id ?? "-"}</td>
+                    <td className="px-4 py-3">{run.recipe?.name ?? run.recipe_id ?? run.train_strategy}</td>
+                    <td className="px-4 py-3">
+                      <div className="h-2 w-28 overflow-hidden rounded-full bg-slate-200">
+                        <div className="h-full rounded-full bg-blue-600" style={{ width: `${progress}%` }} />
+                      </div>
+                      <div className="mt-1 text-xs text-slate-500">{progress}% · {run.current_step ?? "configured"}</div>
+                    </td>
+                    <td className="px-4 py-3">
+                      <Badge tone={run.status === "configured" ? "blue" : "green"}>{run.status}</Badge>
+                    </td>
+                  </tr>
+                );
+              })
             ) : (
               <tr>
-                <td colSpan={5} className="px-4 py-6 text-center text-slate-500">
+                <td colSpan={6} className="px-4 py-6 text-center text-slate-500">
                   아직 생성된 학습 런이 없습니다.
                 </td>
               </tr>
@@ -1071,49 +1118,125 @@ function TrainDeployView({
   dashboard: DashboardResponse;
   onRefresh: () => Promise<void>;
 }) {
-  const [busyAction, setBusyAction] = useState<BusyAction>(null);
-  const [message, setMessage] = useState("");
-
   const productionModel = pickProductionModel(dashboard);
   const stagingModel = pickStagingModel(dashboard);
   const canaryModel = pickCanaryModel(dashboard);
   const candidateModel = canaryModel ?? stagingModel ?? null;
+  const recipes = dashboard.training_recipes ?? [];
+  const firstRecipeId = recipes[0]?.id ?? "balanced-finetune-v1";
+  const defaultBaseModelId = productionModel?.id ?? dashboard.model_versions[0]?.id ?? "";
+  const defaultDeployModelId = (candidateModel ?? productionModel ?? dashboard.model_versions[0] ?? null)?.id ?? "";
   const gateArchitectureId =
     dashboard.architectures.find((arch) => arch.kind === "gate")?.id ?? "ARCH-GATE-EFF";
   const heatmapArchitectureId =
     dashboard.architectures.find((arch) => arch.kind === "heatmap")?.id ?? "ARCH-HM-PC";
 
+  const [busyAction, setBusyAction] = useState<BusyAction>(null);
+  const [message, setMessage] = useState("");
+  const [selectedDatasetId, setSelectedDatasetId] = useState(dashboard.active_dataset_id);
+  const [selectedBaseModelId, setSelectedBaseModelId] = useState(defaultBaseModelId);
+  const [selectedRecipeId, setSelectedRecipeId] = useState(firstRecipeId);
+  const [selectedRunId, setSelectedRunId] = useState(dashboard.training_runs[0]?.id ?? "");
+  const [selectedDeployModelId, setSelectedDeployModelId] = useState(defaultDeployModelId);
+  const [selectedTargetLine, setSelectedTargetLine] = useState<LineId>("LINE-B");
+
+  useEffect(() => {
+    if (!dashboard.dataset_versions.some((dataset) => dataset.id === selectedDatasetId)) {
+      setSelectedDatasetId(dashboard.active_dataset_id);
+    }
+  }, [dashboard.active_dataset_id, dashboard.dataset_versions, selectedDatasetId]);
+
+  useEffect(() => {
+    if (defaultBaseModelId && !dashboard.model_versions.some((model) => model.id === selectedBaseModelId)) {
+      setSelectedBaseModelId(defaultBaseModelId);
+    }
+  }, [dashboard.model_versions, defaultBaseModelId, selectedBaseModelId]);
+
+  useEffect(() => {
+    if (firstRecipeId && !recipes.some((recipe) => recipe.id === selectedRecipeId)) {
+      setSelectedRecipeId(firstRecipeId);
+    }
+  }, [recipes, firstRecipeId, selectedRecipeId]);
+
+  useEffect(() => {
+    if (!dashboard.training_runs.length) {
+      setSelectedRunId("");
+      return;
+    }
+    if (!dashboard.training_runs.some((run) => run.id === selectedRunId)) {
+      setSelectedRunId(dashboard.training_runs[0].id);
+    }
+  }, [dashboard.training_runs, selectedRunId]);
+
+  useEffect(() => {
+    if (defaultDeployModelId && !dashboard.model_versions.some((model) => model.id === selectedDeployModelId)) {
+      setSelectedDeployModelId(defaultDeployModelId);
+    }
+  }, [dashboard.model_versions, defaultDeployModelId, selectedDeployModelId]);
+
+  const selectedDataset = dashboard.dataset_versions.find((dataset) => dataset.id === selectedDatasetId);
+  const selectedBaseModel = dashboard.model_versions.find((model) => model.id === selectedBaseModelId) ?? null;
+  const selectedRecipe = recipes.find((recipe) => recipe.id === selectedRecipeId) ?? recipes[0];
+  const selectedRun =
+    dashboard.training_runs.find((run) => run.id === selectedRunId) ?? dashboard.training_runs[0] ?? null;
+  const selectedDeployModel =
+    dashboard.model_versions.find((model) => model.id === selectedDeployModelId) ?? candidateModel ?? null;
+  const selectedRunProgress = Math.min(100, Math.max(0, selectedRun?.progress ?? 0));
+  const selectedRunTone: Tone =
+    selectedRun?.status === "completed" ? "green" : selectedRun?.status === "failed" ? "red" : "blue";
+
   async function handleCreateRun() {
+    if (!selectedDatasetId || !selectedBaseModelId || !selectedRecipeId) {
+      setMessage("학습 데이터셋, 기준 모델, 레시피를 모두 선택하세요.");
+      return;
+    }
+
     try {
       setBusyAction("train");
       setMessage("");
-      await createTrainingRun({
-        datasetVersionId: dashboard.active_dataset_id,
+      const result = await createTrainingRun({
+        datasetVersionId: selectedDatasetId,
+        baseModelVersionId: selectedBaseModelId,
+        recipeId: selectedRecipeId,
+        targetLine: selectedTargetLine,
         gateArchitectureId,
         heatmapArchitectureId,
         trainStrategy: "cascade",
-        notes: "UI created run",
+        notes: `UI configured run from ${selectedBaseModelId} using ${selectedRecipeId}`,
       });
-      setMessage("새 학습 런이 생성되고 배포 후보 모델이 staging 상태로 등록되었습니다.");
+      const createdRun = (result as { training_run?: TrainingRun }).training_run;
+      const createdModel = (result as { model_version?: ModelVersion }).model_version;
+      if (createdRun?.id) setSelectedRunId(createdRun.id);
+      if (createdModel?.id) setSelectedDeployModelId(createdModel.id);
+      setMessage("학습 구성이 저장되고 staging 후보 모델이 등록되었습니다. 실제 학습은 아직 시작되지 않았습니다.");
       await onRefresh();
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "학습 런 생성에 실패했습니다.");
+      setMessage(error instanceof Error ? error.message : "학습 구성 저장에 실패했습니다.");
     } finally {
       setBusyAction(null);
     }
   }
 
+  function handleFinalTrainClick() {
+    window.alert("아직은 작동하지 않습니다");
+    setMessage("최종 학습 실행은 아직 연결되지 않았습니다. 현재는 구성 저장과 상태 표시만 지원합니다.");
+  }
+
   async function handleStartCanary() {
-    if (!stagingModel && !canaryModel) {
-      setMessage("Canary를 시작할 staging 후보 모델이 없습니다. 먼저 새 학습을 실행하세요.");
+    if (!selectedDeployModel) {
+      setMessage("Canary를 시작할 모델을 선택하세요.");
+      return;
+    }
+    if (selectedDeployModel.status === "production") {
+      setMessage("현재 production 모델은 Canary 후보로 다시 사용할 수 없습니다. staging 또는 canary 후보를 선택하세요.");
       return;
     }
 
     try {
       setBusyAction("canary");
       setMessage("");
-      await startCanary((stagingModel ?? canaryModel)!.id, "LINE-B");
-      setMessage("Canary가 LINE-B에서 시작되었습니다.");
+      await startCanary(selectedDeployModel.id, selectedTargetLine);
+      setMessage(`Canary가 ${selectedTargetLine}에서 시작되었습니다.`);
       await onRefresh();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Canary 시작에 실패했습니다.");
@@ -1123,15 +1246,19 @@ function TrainDeployView({
   }
 
   async function handleApprove() {
-    if (!candidateModel) {
-      setMessage("배포 승인할 후보 모델이 없습니다.");
+    if (!selectedDeployModel) {
+      setMessage("배포 승인할 모델을 선택하세요.");
+      return;
+    }
+    if (selectedDeployModel.status === "production") {
+      setMessage("이미 production 상태인 모델입니다.");
       return;
     }
 
     try {
       setBusyAction("approve");
       setMessage("");
-      await promoteModel(candidateModel.id, "production");
+      await promoteModel(selectedDeployModel.id, "production");
       setMessage("배포 승인이 완료되어 production 모델이 갱신되었습니다.");
       await onRefresh();
     } catch (error) {
@@ -1160,70 +1287,895 @@ function TrainDeployView({
       <div className="grid grid-cols-4 gap-4">
         <Stat label="학습 런" value={`${dashboard.training_runs.length}개`} sub="최근 생성 기준" icon={Flame} tone="blue" />
         <Stat label="배포 후보" value={`${dashboard.model_versions.filter((model) => model.status !== "production").length}개`} sub="staging / canary" icon={Rocket} tone="green" />
-        <Stat label="재학습 후보 데이터" value={`${dashboard.dataset_versions[0]?.feedback_count ?? 0}건`} sub="피드백 반영 샘플" icon={Database} tone="amber" />
+        <Stat label="선택 데이터" value={`${selectedDataset?.sample_count ?? 0}개`} sub={selectedDataset?.id ?? "데이터셋 미선택"} icon={Database} tone="amber" />
         <Stat label="현재 production" value={productionModel?.id ?? "-"} sub="실 배포 모델" icon={Cpu} tone="slate" />
       </div>
 
-      <div className="grid min-h-0 grid-cols-[1fr_.95fr] gap-4">
+      <div className="grid min-h-0 grid-cols-[1.08fr_.92fr] gap-4">
         <Card className="flex min-h-0 flex-col p-5">
           <div className="mb-4 flex items-center justify-between">
-            <div className="text-xl font-bold text-slate-950">학습</div>
-            <button
-              onClick={handleCreateRun}
-              disabled={busyAction !== null}
-              className="rounded-2xl border-2 border-blue-600 bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              {busyAction === "train" ? "생성 중..." : "새 학습 실행"}
-            </button>
+            <div>
+              <div className="text-xl font-bold text-slate-950">학습 구성</div>
+              <div className="mt-1 text-sm text-slate-500">데이터셋, 기준 모델, 레시피를 고른 뒤 학습 계획을 저장합니다.</div>
+            </div>
+            <Badge tone={selectedRunTone}>{selectedRun?.current_step ?? "ready"}</Badge>
           </div>
 
           {message ? <div className="mb-4"><MessageBanner message={message} tone="blue" /></div> : null}
-          <TrainingRunsTable runs={dashboard.training_runs} />
-        </Card>
 
-        <Card className="p-5">
-          <div className="mb-4 text-xl font-bold text-slate-950">배포</div>
-          <div className="grid gap-4">
-            <DeploymentCard title="Production" tone="slate" model={productionModel} subtitle="실 운영 중" />
-            <DeploymentCard
-              title="Staging"
-              tone="blue"
-              model={stagingModel}
-              subtitle="검증 대기 또는 바로 Canary 진입 가능"
-            />
-            <DeploymentCard
-              title="Canary"
-              tone="amber"
-              model={canaryModel}
-              subtitle={dashboard.deployment.canary_line ? `${dashboard.deployment.canary_line} 검증중` : "현재 없음"}
-            />
-
+          <div className="min-h-0 overflow-auto pr-1">
             <div className="grid grid-cols-3 gap-3">
+              <label className="rounded-2xl border-2 border-slate-200 bg-slate-50 p-4">
+                <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-400">Dataset</div>
+                <select
+                  value={selectedDatasetId}
+                  onChange={(event) => setSelectedDatasetId(event.target.value)}
+                  className="mt-2 w-full rounded-xl border-2 border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900 outline-none focus:border-blue-500"
+                >
+                  {dashboard.dataset_versions.map((dataset) => (
+                    <option key={dataset.id} value={dataset.id}>
+                      {dataset.name} · {dataset.sample_count}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="rounded-2xl border-2 border-slate-200 bg-slate-50 p-4">
+                <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-400">Base Model</div>
+                <select
+                  value={selectedBaseModelId}
+                  onChange={(event) => setSelectedBaseModelId(event.target.value)}
+                  className="mt-2 w-full rounded-xl border-2 border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900 outline-none focus:border-blue-500"
+                >
+                  {dashboard.model_versions.map((model) => (
+                    <option key={model.id} value={model.id}>
+                      {model.id} · {model.status}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="rounded-2xl border-2 border-slate-200 bg-slate-50 p-4">
+                <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-400">Target Line</div>
+                <select
+                  value={selectedTargetLine}
+                  onChange={(event) => setSelectedTargetLine(event.target.value as LineId)}
+                  className="mt-2 w-full rounded-xl border-2 border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900 outline-none focus:border-blue-500"
+                >
+                  {LINES.map((line) => (
+                    <option key={line} value={line}>
+                      {line}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+
+            <div className="mt-4 grid grid-cols-3 gap-3">
+              {recipes.map((recipe) => {
+                const selected = recipe.id === selectedRecipeId;
+                return (
+                  <button
+                    key={recipe.id}
+                    type="button"
+                    onClick={() => setSelectedRecipeId(recipe.id)}
+                    className={cls(
+                      "rounded-2xl border-2 p-4 text-left transition",
+                      selected ? "border-blue-600 bg-blue-50" : "border-slate-200 bg-white hover:border-blue-300"
+                    )}
+                  >
+                    <div className="text-sm font-bold text-slate-950">{recipe.name}</div>
+                    <div className="mt-1 min-h-10 text-xs text-slate-500">{recipe.description}</div>
+                    <div className="mt-3 grid grid-cols-2 gap-2 text-xs font-semibold text-slate-700">
+                      <span>batch {recipe.batch_size}</span>
+                      <span>lr {recipe.learning_rate}</span>
+                      <span>{recipe.optimizer}</span>
+                      <span>{recipe.epochs} epochs</span>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="mt-4 rounded-2xl border-2 border-slate-200 bg-white p-4">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <div className="text-sm font-bold text-slate-950">학습 상태</div>
+                  <div className="mt-1 text-sm text-slate-500">
+                    {selectedRun
+                      ? `${selectedRun.id} · ${selectedRun.current_step ?? selectedRun.status}`
+                      : "아직 생성된 학습 런이 없습니다."}
+                  </div>
+                </div>
+                <Badge tone={selectedRunTone}>{selectedRun?.status ?? "not-created"}</Badge>
+              </div>
+              <div className="mt-4 h-3 overflow-hidden rounded-full bg-slate-200">
+                <div className="h-full rounded-full bg-blue-600 transition-all" style={{ width: `${selectedRunProgress}%` }} />
+              </div>
+              <div className="mt-2 flex justify-between text-xs font-semibold text-slate-500">
+                <span>{selectedRunProgress}%</span>
+                <span>base {selectedRun?.base_model_version_id ?? selectedBaseModel?.id ?? "-"}</span>
+                <span>{selectedRun?.recipe?.name ?? selectedRecipe?.name ?? "-"}</span>
+              </div>
+            </div>
+
+            <div className="mt-4 grid grid-cols-2 gap-3">
               <button
-                onClick={handleStartCanary}
-                disabled={busyAction !== null}
-                className="rounded-2xl border-2 border-slate-200 px-4 py-3 text-sm font-semibold text-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {busyAction === "canary" ? "시작 중..." : "Canary 시작"}
-              </button>
-              <button
-                onClick={handleApprove}
+                onClick={handleCreateRun}
                 disabled={busyAction !== null}
                 className="rounded-2xl border-2 border-blue-600 bg-blue-600 px-4 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
               >
-                {busyAction === "approve" ? "승인 중..." : "배포 승인"}
+                {busyAction === "train" ? "구성 저장 중..." : "학습 구성 저장"}
               </button>
               <button
-                onClick={handleRollback}
+                onClick={handleFinalTrainClick}
                 disabled={busyAction !== null}
-                className="rounded-2xl border-2 border-rose-600 bg-rose-600 px-4 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
+                className="rounded-2xl border-2 border-slate-900 bg-slate-900 px-4 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
               >
-                {busyAction === "rollback" ? "롤백 중..." : "롤백"}
+                최종 학습 시작
               </button>
+            </div>
+
+            <div className="mt-4">
+              <TrainingRunsTable
+                runs={dashboard.training_runs}
+                selectedRunId={selectedRun?.id}
+                onSelectRun={setSelectedRunId}
+              />
+            </div>
+          </div>
+        </Card>
+
+        <Card className="flex min-h-0 flex-col p-5">
+          <div className="mb-4">
+            <div className="text-xl font-bold text-slate-950">배포 / Canary 선택</div>
+            <div className="mt-1 text-sm text-slate-500">staging, canary, 과거 모델 중에서 직접 후보를 골라 조작합니다.</div>
+          </div>
+
+          <div className="min-h-0 overflow-auto pr-1">
+            <div className="grid gap-3 rounded-2xl border-2 border-slate-200 bg-slate-50 p-4">
+              <label>
+                <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-400">Model Candidate</div>
+                <select
+                  value={selectedDeployModelId}
+                  onChange={(event) => setSelectedDeployModelId(event.target.value)}
+                  className="mt-2 w-full rounded-xl border-2 border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900 outline-none focus:border-blue-500"
+                >
+                  {dashboard.model_versions.map((model) => (
+                    <option key={model.id} value={model.id}>
+                      {model.id} · {model.status} · {model.recipe_id ?? "baseline"}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="grid grid-cols-2 gap-3 text-sm text-slate-600">
+                <div>기준 모델: {selectedDeployModel?.base_model_version_id ?? "-"}</div>
+                <div>데이터셋: {selectedDeployModel?.dataset_version_id ?? "-"}</div>
+                <div>레시피: {selectedDeployModel?.recipe_id ?? "-"}</div>
+                <div>목표 라인: {selectedTargetLine}</div>
+              </div>
+            </div>
+
+            <div className="mt-4 grid gap-4">
+              <DeploymentCard title="Production" tone="slate" model={productionModel} subtitle="실 운영 중" />
+              <DeploymentCard
+                title="Staging"
+                tone="blue"
+                model={stagingModel}
+                subtitle="검증 대기 또는 바로 Canary 진입 가능"
+              />
+              <DeploymentCard
+                title="Canary"
+                tone="amber"
+                model={canaryModel}
+                subtitle={dashboard.deployment.canary_line ? `${dashboard.deployment.canary_line} 검증중` : "현재 없음"}
+              />
+
+              <div className="grid grid-cols-3 gap-3">
+                <button
+                  onClick={handleStartCanary}
+                  disabled={busyAction !== null}
+                  className="rounded-2xl border-2 border-slate-200 px-4 py-3 text-sm font-semibold text-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {busyAction === "canary" ? "시작 중..." : "Canary 시작"}
+                </button>
+                <button
+                  onClick={handleApprove}
+                  disabled={busyAction !== null}
+                  className="rounded-2xl border-2 border-blue-600 bg-blue-600 px-4 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {busyAction === "approve" ? "승인 중..." : "배포 승인"}
+                </button>
+                <button
+                  onClick={handleRollback}
+                  disabled={busyAction !== null}
+                  className="rounded-2xl border-2 border-rose-600 bg-rose-600 px-4 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {busyAction === "rollback" ? "롤백 중..." : "롤백"}
+                </button>
+              </div>
             </div>
           </div>
         </Card>
       </div>
+    </div>
+  );
+}
+
+function TrainDeployViewV2({
+  dashboard,
+  onRefresh,
+}: {
+  dashboard: DashboardResponse;
+  onRefresh: () => Promise<void>;
+}) {
+  const productionModel = pickProductionModel(dashboard);
+  const stagingModel = pickStagingModel(dashboard);
+  const canaryModel = pickCanaryModel(dashboard);
+  const candidateModel = canaryModel ?? stagingModel ?? null;
+  const recipes = dashboard.training_recipes ?? [];
+  const firstRecipe = recipes[0];
+  const defaultBaseModelId = productionModel?.id ?? dashboard.model_versions[0]?.id ?? "";
+  const defaultDeployModelId = (candidateModel ?? productionModel ?? dashboard.model_versions[0] ?? null)?.id ?? "";
+  const gateArchitectureId =
+    dashboard.architectures.find((arch) => arch.kind === "gate")?.id ?? "ARCH-GATE-EFF";
+  const heatmapArchitectureId =
+    dashboard.architectures.find((arch) => arch.kind === "heatmap")?.id ?? "ARCH-HM-PC";
+
+  const [busyAction, setBusyAction] = useState<BusyAction>(null);
+  const [message, setMessage] = useState("");
+  const [selectedDatasetId, setSelectedDatasetId] = useState(dashboard.active_dataset_id);
+  const [selectedBaseModelId, setSelectedBaseModelId] = useState(defaultBaseModelId);
+  const [selectedRecipeId, setSelectedRecipeId] = useState(firstRecipe?.id ?? "cpu-balanced-effnetb0");
+  const [selectedDeployModelId, setSelectedDeployModelId] = useState(defaultDeployModelId);
+  const [selectedCanaryLine, setSelectedCanaryLine] = useState<LineId>("LINE-B");
+  const [epochCount, setEpochCount] = useState(firstRecipe?.default_epochs ?? 3);
+  const [recipeDraft, setRecipeDraft] = useState<TrainingRecipe>(() => recipeDraftFrom(firstRecipe));
+
+  const activeRun =
+    dashboard.training_runs.find((run) => ["preparing", "running", "stopping"].includes(run.status)) ?? null;
+  const latestRun = activeRun ?? dashboard.training_runs[0] ?? null;
+  const selectedDataset = dashboard.dataset_versions.find((dataset) => dataset.id === selectedDatasetId);
+  const selectedBaseModel = dashboard.model_versions.find((model) => model.id === selectedBaseModelId) ?? null;
+  const selectedRecipe = recipes.find((recipe) => recipe.id === selectedRecipeId) ?? firstRecipe;
+  const selectedDeployModel =
+    dashboard.model_versions.find((model) => model.id === selectedDeployModelId) ?? candidateModel ?? null;
+  const runProgress = Math.min(100, Math.max(0, latestRun?.progress ?? 0));
+  const runTone: Tone =
+    latestRun?.status === "completed"
+      ? "green"
+      : latestRun?.status === "failed" || latestRun?.status === "stopped"
+        ? "red"
+        : "blue";
+
+  useEffect(() => {
+    if (!dashboard.dataset_versions.some((dataset) => dataset.id === selectedDatasetId)) {
+      setSelectedDatasetId(dashboard.active_dataset_id);
+    }
+  }, [dashboard.active_dataset_id, dashboard.dataset_versions, selectedDatasetId]);
+
+  useEffect(() => {
+    if (defaultBaseModelId && !dashboard.model_versions.some((model) => model.id === selectedBaseModelId)) {
+      setSelectedBaseModelId(defaultBaseModelId);
+    }
+  }, [dashboard.model_versions, defaultBaseModelId, selectedBaseModelId]);
+
+  useEffect(() => {
+    if (firstRecipe && !recipes.some((recipe) => recipe.id === selectedRecipeId)) {
+      setSelectedRecipeId(firstRecipe.id);
+      setRecipeDraft(recipeDraftFrom(firstRecipe));
+      setEpochCount(firstRecipe.default_epochs ?? 3);
+    }
+  }, [recipes, firstRecipe, selectedRecipeId]);
+
+  useEffect(() => {
+    if (defaultDeployModelId && !dashboard.model_versions.some((model) => model.id === selectedDeployModelId)) {
+      setSelectedDeployModelId(defaultDeployModelId);
+    }
+  }, [dashboard.model_versions, defaultDeployModelId, selectedDeployModelId]);
+
+  function selectRecipe(recipe: TrainingRecipe) {
+    setSelectedRecipeId(recipe.id);
+    setRecipeDraft(recipeDraftFrom(recipe));
+    setEpochCount(recipe.default_epochs ?? 3);
+    setMessage(`${recipe.name} 레시피를 선택했습니다.`);
+  }
+
+  async function handleStartTraining() {
+    if (!selectedDatasetId || !selectedBaseModelId || !selectedRecipeId) {
+      setMessage("학습 데이터셋, 기준 모델, 레시피를 모두 선택하세요.");
+      return;
+    }
+    if (activeRun) {
+      setMessage(`이미 학습이 진행 중입니다: ${activeRun.id}`);
+      return;
+    }
+
+    try {
+      setBusyAction("train");
+      setMessage("");
+      const result = await createTrainingRun({
+        datasetVersionId: selectedDatasetId,
+        baseModelVersionId: selectedBaseModelId,
+        recipeId: selectedRecipeId,
+        epochs: epochCount,
+        gateArchitectureId,
+        heatmapArchitectureId,
+        trainStrategy: "cascade",
+        notes: `CPU training from ${selectedBaseModelId} using ${selectedRecipeId}`,
+      });
+      const createdModel = (result as { model_version?: ModelVersion }).model_version;
+      if (createdModel?.id) setSelectedDeployModelId(createdModel.id);
+      setMessage("CPU 학습을 시작했습니다. 상태 바는 자동 갱신됩니다.");
+      await onRefresh();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "학습 시작에 실패했습니다.");
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleStopTraining() {
+    if (!activeRun) {
+      setMessage("중지할 학습 런이 없습니다.");
+      return;
+    }
+
+    try {
+      setBusyAction("stop");
+      setMessage("");
+      await stopTrainingRun(activeRun.id);
+      setMessage(`${activeRun.id} 중지 요청을 보냈습니다.`);
+      await onRefresh();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "학습 중지에 실패했습니다.");
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleSaveRecipe() {
+    try {
+      setBusyAction("train");
+      const response = await saveTrainingRecipe({
+        ...recipeDraft,
+        default_epochs: epochCount,
+      });
+      setSelectedRecipeId(response.recipe.id);
+      setRecipeDraft(recipeDraftFrom(response.recipe));
+      setMessage(`새 레시피 JSON을 저장했습니다: ${response.recipe.id}`);
+      await onRefresh();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "레시피 저장에 실패했습니다.");
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleStartCanary() {
+    if (!selectedDeployModel) {
+      setMessage("Canary를 시작할 모델을 선택하세요.");
+      return;
+    }
+    if (selectedDeployModel.status === "production") {
+      setMessage("현재 production 모델은 Canary 후보로 다시 사용할 수 없습니다.");
+      return;
+    }
+
+    try {
+      setBusyAction("canary");
+      setMessage("");
+      await startCanary(selectedDeployModel.id, selectedCanaryLine);
+      setMessage(`Canary가 ${selectedCanaryLine}에서 시작되었습니다.`);
+      await onRefresh();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Canary 시작에 실패했습니다.");
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleApprove() {
+    if (!selectedDeployModel) {
+      setMessage("배포 승인할 모델을 선택하세요.");
+      return;
+    }
+    if (selectedDeployModel.status === "production") {
+      setMessage("이미 production 상태인 모델입니다.");
+      return;
+    }
+
+    try {
+      setBusyAction("approve");
+      setMessage("");
+      await promoteModel(selectedDeployModel.id, "production");
+      setMessage("배포 승인이 완료되어 production 모델이 갱신되었습니다.");
+      await onRefresh();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "배포 승인에 실패했습니다.");
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  async function handleRollback() {
+    try {
+      setBusyAction("rollback");
+      setMessage("");
+      await rollbackDeployment();
+      setMessage("이전 production 후보로 롤백되었습니다.");
+      await onRefresh();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "롤백에 실패했습니다.");
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  return (
+    <div className="grid h-full min-h-0 grid-rows-[auto_1fr] gap-4">
+      <div className="grid grid-cols-4 gap-4">
+        <Stat label="학습 상태" value={activeRun ? "진행 중" : "대기"} sub={latestRun?.id ?? "런 없음"} icon={Flame} tone="blue" />
+        <Stat label="선택 데이터" value={`${selectedDataset?.sample_count ?? 0}개`} sub={selectedDataset?.id ?? "데이터셋 미선택"} icon={Database} tone="amber" />
+        <Stat label="기준 모델" value={selectedBaseModel?.id ?? "-"} sub={selectedBaseModel?.status ?? "모델 미선택"} icon={Cpu} tone="slate" />
+        <Stat label="현재 production" value={productionModel?.id ?? "-"} sub="실 배포 모델" icon={Rocket} tone="green" />
+      </div>
+
+      <div className="grid min-h-0 grid-cols-[1.08fr_.92fr] gap-4">
+        <Card className="flex min-h-0 flex-col p-5">
+          <div className="mb-4 flex items-center justify-between">
+            <div>
+              <div className="text-xl font-bold text-slate-950">CPU 학습</div>
+              <div className="mt-1 text-sm text-slate-500">데이터셋과 기준 모델을 고른 뒤 JSON 레시피를 바로 사용하거나 수정 저장합니다.</div>
+            </div>
+            <Badge tone={runTone}>{latestRun?.current_step ?? "ready"}</Badge>
+          </div>
+
+          {message ? <div className="mb-4"><MessageBanner message={message} tone="blue" /></div> : null}
+
+          <div className="min-h-0 overflow-auto pr-1">
+            <div className="grid grid-cols-3 gap-3">
+              <label className="rounded-2xl border-2 border-slate-200 bg-slate-50 p-4">
+                <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-400">Dataset</div>
+                <select
+                  value={selectedDatasetId}
+                  onChange={(event) => setSelectedDatasetId(event.target.value)}
+                  className="mt-2 w-full rounded-xl border-2 border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900 outline-none focus:border-blue-500"
+                >
+                  {dashboard.dataset_versions.map((dataset) => (
+                    <option key={dataset.id} value={dataset.id}>
+                      {dataset.name} · {dataset.sample_count}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="rounded-2xl border-2 border-slate-200 bg-slate-50 p-4">
+                <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-400">Base Model</div>
+                <select
+                  value={selectedBaseModelId}
+                  onChange={(event) => setSelectedBaseModelId(event.target.value)}
+                  className="mt-2 w-full rounded-xl border-2 border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900 outline-none focus:border-blue-500"
+                >
+                  {dashboard.model_versions.map((model) => (
+                    <option key={model.id} value={model.id}>
+                      {model.id} · {model.status}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="rounded-2xl border-2 border-slate-200 bg-slate-50 p-4">
+                <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-400">Epoch</div>
+                <input
+                  type="number"
+                  min={1}
+                  max={200}
+                  value={epochCount}
+                  onChange={(event) => setEpochCount(Math.max(1, Number(event.target.value)))}
+                  className="mt-2 w-full rounded-xl border-2 border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900 outline-none focus:border-blue-500"
+                />
+              </label>
+            </div>
+
+            <div className="mt-4 grid grid-cols-[.88fr_1.12fr] gap-4">
+              <div className="max-h-72 overflow-auto rounded-2xl border-2 border-slate-200 bg-white p-3">
+                <div className="mb-2 text-sm font-bold text-slate-950">레시피 JSON 목록</div>
+                <div className="space-y-2">
+                  {recipes.map((recipe) => (
+                    <div key={recipe.id} className={cls("rounded-2xl border-2 p-3", recipe.id === selectedRecipeId ? "border-blue-600 bg-blue-50" : "border-slate-200")}>
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <div className="text-sm font-bold text-slate-950">{recipe.name}</div>
+                          <div className="mt-1 text-xs text-slate-500">{recipe.description}</div>
+                        </div>
+                        <Badge tone={recipe.source === "custom" ? "green" : "blue"}>{recipe.source ?? "json"}</Badge>
+                      </div>
+                      <div className="mt-2 grid grid-cols-2 gap-1 text-xs font-semibold text-slate-600">
+                        <span>batch {recipe.batch_size}</span>
+                        <span>lr {recipe.learning_rate}</span>
+                        <span>{recipe.optimizer}</span>
+                        <span>{recipe.scheduler}</span>
+                      </div>
+                      <div className="mt-3 grid grid-cols-2 gap-2">
+                        <button
+                          type="button"
+                          onClick={() => selectRecipe(recipe)}
+                          className="rounded-xl border-2 border-blue-600 bg-blue-600 px-3 py-2 text-xs font-semibold text-white"
+                        >
+                          바로 사용
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setRecipeDraft(recipeDraftFrom(recipe));
+                            setEpochCount(recipe.default_epochs ?? 3);
+                            setMessage(`${recipe.name} 레시피를 수정 모드로 불러왔습니다.`);
+                          }}
+                          className="rounded-xl border-2 border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700"
+                        >
+                          수정
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="rounded-2xl border-2 border-slate-200 bg-slate-50 p-4">
+                <div className="text-sm font-bold text-slate-950">레시피 수정 후 새 JSON 저장</div>
+                <div className="mt-3 grid grid-cols-2 gap-3">
+                  <input className="rounded-xl border-2 border-slate-200 px-3 py-2 text-sm" value={recipeDraft.name} onChange={(e) => setRecipeDraft({ ...recipeDraft, name: e.target.value })} placeholder="name" />
+                  <select className="rounded-xl border-2 border-slate-200 px-3 py-2 text-sm" value={recipeDraft.optimizer} onChange={(e) => setRecipeDraft({ ...recipeDraft, optimizer: e.target.value })}>
+                    {["AdamW", "Adam", "SGD"].map((optimizer) => <option key={optimizer}>{optimizer}</option>)}
+                  </select>
+                  <input className="rounded-xl border-2 border-slate-200 px-3 py-2 text-sm" type="number" min={1} value={recipeDraft.batch_size} onChange={(e) => setRecipeDraft({ ...recipeDraft, batch_size: Number(e.target.value) })} placeholder="batch" />
+                  <input className="rounded-xl border-2 border-slate-200 px-3 py-2 text-sm" type="number" step="0.0001" value={recipeDraft.learning_rate} onChange={(e) => setRecipeDraft({ ...recipeDraft, learning_rate: Number(e.target.value) })} placeholder="lr" />
+                  <input className="rounded-xl border-2 border-slate-200 px-3 py-2 text-sm" type="number" step="0.001" value={recipeDraft.weight_decay} onChange={(e) => setRecipeDraft({ ...recipeDraft, weight_decay: Number(e.target.value) })} placeholder="weight decay" />
+                  <select className="rounded-xl border-2 border-slate-200 px-3 py-2 text-sm" value={recipeDraft.scheduler} onChange={(e) => setRecipeDraft({ ...recipeDraft, scheduler: e.target.value })}>
+                    {["cosine", "step", "none"].map((scheduler) => <option key={scheduler}>{scheduler}</option>)}
+                  </select>
+                  <textarea className="col-span-2 rounded-xl border-2 border-slate-200 px-3 py-2 text-sm" rows={2} value={recipeDraft.description} onChange={(e) => setRecipeDraft({ ...recipeDraft, description: e.target.value })} placeholder="description" />
+                </div>
+                <button
+                  onClick={handleSaveRecipe}
+                  disabled={busyAction !== null}
+                  className="mt-3 w-full rounded-2xl border-2 border-slate-900 bg-slate-900 px-4 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  수정본을 새 JSON으로 저장
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-4 rounded-2xl border-2 border-slate-200 bg-white p-4">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <div className="text-sm font-bold text-slate-950">학습 상태</div>
+                  <div className="mt-1 text-sm text-slate-500">
+                    {latestRun ? `${latestRun.id} · ${latestRun.status}` : "아직 학습 런이 없습니다."}
+                  </div>
+                </div>
+                <Badge tone={runTone}>{latestRun?.current_step ?? "ready"}</Badge>
+              </div>
+              <div className="mt-4 h-3 overflow-hidden rounded-full bg-slate-200">
+                <div className="h-full rounded-full bg-blue-600 transition-all" style={{ width: `${runProgress}%` }} />
+              </div>
+              <div className="mt-2 flex justify-between text-xs font-semibold text-slate-500">
+                <span>{runProgress}%</span>
+                <span>{latestRun?.device ?? "cpu"}</span>
+                <span>{latestRun?.recipe?.name ?? selectedRecipe?.name ?? "-"}</span>
+              </div>
+              {latestRun?.logs?.length ? (
+                <div className="mt-3 max-h-24 overflow-auto rounded-xl bg-slate-950 p-3 font-mono text-xs text-slate-100">
+                  {latestRun.logs.slice(-5).map((log, index) => (
+                    <div key={`${log.time}-${index}`}>{log.message}</div>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+
+            <div className="mt-4 grid grid-cols-2 gap-3">
+              <button
+                onClick={handleStartTraining}
+                disabled={busyAction !== null || Boolean(activeRun)}
+                className="rounded-2xl border-2 border-blue-600 bg-blue-600 px-4 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {busyAction === "train" ? "학습 시작 중..." : "최종 학습 시작"}
+              </button>
+              <button
+                onClick={handleStopTraining}
+                disabled={busyAction !== null || !activeRun}
+                className="rounded-2xl border-2 border-rose-600 bg-rose-600 px-4 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {busyAction === "stop" ? "중지 요청 중..." : "학습 중지"}
+              </button>
+            </div>
+          </div>
+        </Card>
+
+        <Card className="flex min-h-0 flex-col p-5">
+          <div className="mb-4">
+            <div className="text-xl font-bold text-slate-950">배포 / Canary 선택</div>
+            <div className="mt-1 text-sm text-slate-500">학습 완료 후 staging 모델을 선택해서 canary 또는 production으로 올립니다.</div>
+          </div>
+
+          <div className="min-h-0 overflow-auto pr-1">
+            <div className="grid gap-3 rounded-2xl border-2 border-slate-200 bg-slate-50 p-4">
+              <label>
+                <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-400">Model Candidate</div>
+                <select
+                  value={selectedDeployModelId}
+                  onChange={(event) => setSelectedDeployModelId(event.target.value)}
+                  className="mt-2 w-full rounded-xl border-2 border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900 outline-none focus:border-blue-500"
+                >
+                  {dashboard.model_versions.map((model) => (
+                    <option key={model.id} value={model.id}>
+                      {model.id} · {model.status} · {model.recipe_id ?? "baseline"}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-400">Canary Line</div>
+                <select
+                  value={selectedCanaryLine}
+                  onChange={(event) => setSelectedCanaryLine(event.target.value as LineId)}
+                  className="mt-2 w-full rounded-xl border-2 border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900 outline-none focus:border-blue-500"
+                >
+                  {LINES.map((line) => <option key={line}>{line}</option>)}
+                </select>
+              </label>
+              <div className="grid grid-cols-2 gap-3 text-sm text-slate-600">
+                <div>기준 모델: {selectedDeployModel?.base_model_version_id ?? "-"}</div>
+                <div>데이터셋: {selectedDeployModel?.dataset_version_id ?? "-"}</div>
+                <div>레시피: {selectedDeployModel?.recipe_id ?? "-"}</div>
+                <div>Canary 라인: {selectedCanaryLine}</div>
+              </div>
+            </div>
+
+            <div className="mt-4 grid gap-4">
+              <DeploymentCard title="Production" tone="slate" model={productionModel} subtitle="실 운영 중" />
+              <DeploymentCard title="Staging" tone="blue" model={stagingModel} subtitle="검증 대기 또는 바로 Canary 진입 가능" />
+              <DeploymentCard title="Canary" tone="amber" model={canaryModel} subtitle={dashboard.deployment.canary_line ? `${dashboard.deployment.canary_line} 검증중` : "현재 없음"} />
+
+              <div className="grid grid-cols-3 gap-3">
+                <button onClick={handleStartCanary} disabled={busyAction !== null} className="rounded-2xl border-2 border-slate-200 px-4 py-3 text-sm font-semibold text-slate-800 disabled:cursor-not-allowed disabled:opacity-60">
+                  {busyAction === "canary" ? "시작 중..." : "Canary 시작"}
+                </button>
+                <button onClick={handleApprove} disabled={busyAction !== null} className="rounded-2xl border-2 border-blue-600 bg-blue-600 px-4 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60">
+                  {busyAction === "approve" ? "승인 중..." : "배포 승인"}
+                </button>
+                <button onClick={handleRollback} disabled={busyAction !== null} className="rounded-2xl border-2 border-rose-600 bg-rose-600 px-4 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60">
+                  {busyAction === "rollback" ? "롤백 중..." : "롤백"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
+function VersionViewV2({
+  dashboard,
+  onRefresh,
+}: {
+  dashboard: DashboardResponse;
+  onRefresh: () => Promise<void>;
+}) {
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [targetDatasetId, setTargetDatasetId] = useState(dashboard.active_dataset_id);
+  const [datasetMode, setDatasetMode] = useState<"append" | "new">("append");
+  const [datasetName, setDatasetName] = useState("");
+  const [uploadLabel, setUploadLabel] = useState("normal");
+  const [uploadFiles, setUploadFiles] = useState<File[]>([]);
+
+  useEffect(() => {
+    if (!dashboard.dataset_versions.some((dataset) => dataset.id === targetDatasetId)) {
+      setTargetDatasetId(dashboard.active_dataset_id);
+    }
+  }, [dashboard.active_dataset_id, dashboard.dataset_versions, targetDatasetId]);
+
+  async function handleFeedbackMaterialize(mode: "append" | "new") {
+    try {
+      setBusy(true);
+      setMessage("");
+      await materializeFeedbackDataset({
+        mode,
+        targetDatasetId,
+        datasetName: mode === "new" ? datasetName : undefined,
+        feedbackItemIds: dashboard.feedback_items.map((item) => item.id),
+      });
+      setMessage(mode === "new" ? "피드백 묶음으로 새 데이터셋을 만들었습니다." : "피드백 묶음을 기존 데이터셋에 추가했습니다.");
+      await onRefresh();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "피드백 데이터셋 처리에 실패했습니다.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleUploadFiles() {
+    if (!uploadFiles.length) {
+      setMessage("추가할 데이터 파일을 선택하세요.");
+      return;
+    }
+
+    try {
+      setBusy(true);
+      setMessage("");
+      await uploadDatasetFiles({
+        files: uploadFiles,
+        label: uploadLabel,
+        sourceType: "bulk_upload",
+        line: "",
+        comment: "Uploaded from version screen",
+        datasetMode,
+        datasetVersionId: targetDatasetId,
+        datasetName,
+      });
+      setUploadFiles([]);
+      setMessage(datasetMode === "new" ? "파일로 새 데이터셋을 만들었습니다." : "파일을 선택한 데이터셋에 추가했습니다.");
+      await onRefresh();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "데이터 파일 업로드에 실패했습니다.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="grid h-full min-h-0 grid-cols-[1.05fr_.95fr] gap-4">
+      <Card className="flex min-h-0 flex-col p-5">
+        <div className="mb-4 flex items-start justify-between gap-4">
+          <div>
+            <div className="text-xl font-bold text-slate-950">데이터 버전</div>
+            <div className="mt-1 text-sm text-slate-500">저장된 데이터셋을 확인하고, 피드백 묶음 또는 파일 업로드로 확장합니다.</div>
+          </div>
+          <Badge tone="blue">{dashboard.dataset_versions.length} versions</Badge>
+        </div>
+
+        {message ? <div className="mb-4"><MessageBanner message={message} tone="blue" /></div> : null}
+
+        <div className="mb-4 rounded-2xl border-2 border-slate-200 bg-slate-50 p-4">
+          <div className="grid grid-cols-2 gap-3">
+            <label>
+              <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-400">Target Dataset</div>
+              <select
+                value={targetDatasetId}
+                onChange={(event) => setTargetDatasetId(event.target.value)}
+                className="mt-2 w-full rounded-xl border-2 border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900 outline-none focus:border-blue-500"
+              >
+                {dashboard.dataset_versions.map((dataset) => (
+                  <option key={dataset.id} value={dataset.id}>
+                    {dataset.name} · {dataset.sample_count}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-400">New Dataset Name</div>
+              <input
+                value={datasetName}
+                onChange={(event) => setDatasetName(event.target.value)}
+                className="mt-2 w-full rounded-xl border-2 border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900 outline-none focus:border-blue-500"
+                placeholder="새 데이터셋 이름"
+              />
+            </label>
+          </div>
+
+          <div className="mt-3 grid grid-cols-2 gap-3">
+            <button
+              onClick={() => handleFeedbackMaterialize("append")}
+              disabled={busy || !dashboard.feedback_items.length}
+              className="rounded-2xl border-2 border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              피드백 묶음 기존 데이터셋에 추가
+            </button>
+            <button
+              onClick={() => handleFeedbackMaterialize("new")}
+              disabled={busy || !dashboard.feedback_items.length}
+              className="rounded-2xl border-2 border-blue-600 bg-blue-600 px-4 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              피드백 묶음으로 새 데이터셋 생성
+            </button>
+          </div>
+
+          <div className="mt-4 grid grid-cols-[1fr_.7fr_.7fr] gap-3">
+            <input
+              type="file"
+              multiple
+              onChange={(event) => setUploadFiles(Array.from(event.target.files ?? []))}
+              className="rounded-xl border-2 border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
+            />
+            <select
+              value={uploadLabel}
+              onChange={(event) => setUploadLabel(event.target.value)}
+              className="rounded-xl border-2 border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900"
+            >
+              <option value="normal">normal</option>
+              <option value="anomaly">anomaly</option>
+              <option value="unlabeled">unlabeled</option>
+            </select>
+            <select
+              value={datasetMode}
+              onChange={(event) => setDatasetMode(event.target.value as "append" | "new")}
+              className="rounded-xl border-2 border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900"
+            >
+              <option value="append">기존에 추가</option>
+              <option value="new">새 데이터셋</option>
+            </select>
+          </div>
+          <button
+            onClick={handleUploadFiles}
+            disabled={busy || !uploadFiles.length}
+            className="mt-3 w-full rounded-2xl border-2 border-slate-900 bg-slate-900 px-4 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            선택 파일 데이터셋에 반영
+          </button>
+        </div>
+
+        <div className="min-h-0 overflow-auto pr-1">
+          <div className="space-y-3">
+            {dashboard.dataset_versions.map((dataset) => (
+              <div key={dataset.id} className="rounded-2xl border-2 border-slate-200 p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-bold text-slate-900">{dataset.name}</div>
+                    <div className="mt-1 text-xs text-slate-500">{dataset.id}</div>
+                  </div>
+                  <Badge tone="blue">{dataset.status}</Badge>
+                </div>
+                <div className="mt-2 grid grid-cols-3 gap-3 text-sm text-slate-600">
+                  <div>샘플 {dataset.sample_count}</div>
+                  <div>피드백 {dataset.feedback_count}</div>
+                  <div>원본 {dataset.source_dataset_id ?? "-"}</div>
+                </div>
+                <div className="mt-2 text-sm text-slate-500">{dataset.notes || "메모 없음"}</div>
+                <div className="mt-2 text-xs text-slate-400">{formatDate(dataset.updated_at)}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </Card>
+
+      <Card className="flex min-h-0 flex-col p-5">
+        <div className="mb-4 flex items-start justify-between gap-4">
+          <div>
+            <div className="text-xl font-bold text-slate-950">학습된 모델 리스트</div>
+            <div className="mt-1 text-sm text-slate-500">production, staging, canary, 실패/중지 모델까지 이력으로 확인합니다.</div>
+          </div>
+          <Badge tone="green">{dashboard.model_versions.length} models</Badge>
+        </div>
+
+        <div className="min-h-0 overflow-auto pr-1">
+          <div className="space-y-3">
+            {dashboard.model_versions.map((model) => (
+              <div key={model.id} className="rounded-2xl border-2 border-slate-200 p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-bold text-slate-900">{model.id}</div>
+                    <div className="mt-1 text-xs text-slate-500">{model.name}</div>
+                  </div>
+                  <Badge tone={model.status === "production" ? "green" : model.status === "canary" ? "amber" : model.status === "failed" || model.status === "stopped" ? "red" : "blue"}>
+                    {model.status}
+                  </Badge>
+                </div>
+                <div className="mt-2 grid grid-cols-2 gap-3 text-sm text-slate-600">
+                  <div>Data {model.dataset_version_id ?? "-"}</div>
+                  <div>Base {model.base_model_version_id ?? "-"}</div>
+                  <div>Recipe {model.recipe_id ?? "-"}</div>
+                  <div>F1 {model.metrics.f1 ?? "-"}</div>
+                </div>
+                <div className="mt-2 text-sm text-slate-500">{model.lineage}</div>
+                <div className="mt-2 text-xs text-slate-400">{formatDate(model.updated_at ?? model.created_at)}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </Card>
     </div>
   );
 }
@@ -1438,10 +2390,10 @@ function AdminPage({
     );
   }
   if (adminTab === "train") {
-    return <TrainDeployView dashboard={dashboard} onRefresh={onRefresh} />;
+    return <TrainDeployViewV2 dashboard={dashboard} onRefresh={onRefresh} />;
   }
   if (adminTab === "version") {
-    return <VersionView dashboard={dashboard} />;
+    return <VersionViewV2 dashboard={dashboard} onRefresh={onRefresh} />;
   }
   return <LogsView dashboard={dashboard} />;
 }
@@ -1469,6 +2421,18 @@ export default function App() {
   useEffect(() => {
     void refresh();
   }, []);
+
+  const hasActiveTraining = Boolean(
+    dashboard?.training_runs.some((run) => ["preparing", "running", "stopping"].includes(run.status))
+  );
+
+  useEffect(() => {
+    if (!hasActiveTraining) return;
+    const timer = window.setInterval(() => {
+      void refresh();
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [hasActiveTraining]);
 
   let content: React.ReactNode = null;
   if (dashboard) {

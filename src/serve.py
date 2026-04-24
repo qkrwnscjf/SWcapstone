@@ -7,7 +7,9 @@ import logging
 import os
 import pickle
 import shutil
+import subprocess
 import sys
+import threading
 import time
 import uuid
 from copy import deepcopy
@@ -79,10 +81,20 @@ def _resolve_project_root() -> Path:
 
 
 PROJECT_ROOT = _resolve_project_root()
+CONFIGS_ROOT = PROJECT_ROOT / "configs"
+SPLITS_ROOT = PROJECT_ROOT / "splits"
+MODELS_ROOT = PROJECT_ROOT / "models"
 MLOPS_ROOT = PROJECT_ROOT / "storage" / "mlops"
 MLOPS_ASSETS_ROOT = MLOPS_ROOT / "assets"
 MLOPS_STATE_PATH = MLOPS_ROOT / "state.json"
+TRAINING_RECIPES_PATH = CONFIGS_ROOT / "training_recipes.json"
+CUSTOM_RECIPES_ROOT = MLOPS_ROOT / "recipes"
+TRAINING_RUNS_ROOT = MLOPS_ROOT / "training_runs"
 MLOPS_ASSETS_ROOT.mkdir(parents=True, exist_ok=True)
+
+STATE_LOCK = threading.RLock()
+TRAINING_JOB_LOCK = threading.RLock()
+TRAINING_JOBS: Dict[str, subprocess.Popen] = {}
 
 
 def _has_mps() -> bool:
@@ -363,6 +375,105 @@ class _Metrics:
 metrics = _Metrics()
 
 
+TRAINING_RECIPES: List[Dict[str, Any]] = [
+    {
+        "id": "balanced-finetune-v1",
+        "name": "Balanced Fine-tune",
+        "description": "Default recipe for stable cascade fine-tuning.",
+        "batch_size": 16,
+        "learning_rate": 0.0003,
+        "optimizer": "AdamW",
+        "epochs": 12,
+        "weight_decay": 0.01,
+        "scheduler": "cosine",
+    },
+    {
+        "id": "fast-line-check-v1",
+        "name": "Fast Line Check",
+        "description": "Short smoke recipe for quick line-level validation.",
+        "batch_size": 8,
+        "learning_rate": 0.001,
+        "optimizer": "Adam",
+        "epochs": 4,
+        "weight_decay": 0.0,
+        "scheduler": "step",
+    },
+    {
+        "id": "low-lr-recovery-v1",
+        "name": "Low-LR Recovery",
+        "description": "Conservative recipe for fine-tuning from a strong production baseline.",
+        "batch_size": 24,
+        "learning_rate": 0.0001,
+        "optimizer": "AdamW",
+        "epochs": 18,
+        "weight_decay": 0.02,
+        "scheduler": "cosine-warmup",
+    },
+]
+
+
+def _normalize_recipe(recipe: Dict[str, Any], *, source: str = "json") -> Dict[str, Any]:
+    normalized = dict(recipe)
+    normalized["id"] = str(normalized.get("id") or _slugify(str(normalized.get("name", "recipe"))))
+    normalized["name"] = str(normalized.get("name") or normalized["id"])
+    normalized["description"] = str(normalized.get("description") or "")
+    normalized["gate_model"] = str(normalized.get("gate_model") or "effnetb0")
+    normalized["batch_size"] = int(normalized.get("batch_size") or 8)
+    normalized["learning_rate"] = float(normalized.get("learning_rate") or normalized.get("lr") or 0.0003)
+    normalized["optimizer"] = str(normalized.get("optimizer") or "AdamW")
+    normalized["weight_decay"] = float(normalized.get("weight_decay") or 0.0)
+    normalized["scheduler"] = str(normalized.get("scheduler") or "cosine")
+    normalized["early_stopping_patience"] = int(normalized.get("early_stopping_patience") or 5)
+    normalized["default_epochs"] = int(normalized.get("default_epochs") or normalized.get("epochs") or 3)
+    normalized["source"] = str(normalized.get("source") or source)
+    return normalized
+
+
+def _load_training_recipes() -> List[Dict[str, Any]]:
+    recipes: List[Dict[str, Any]] = []
+    if TRAINING_RECIPES_PATH.exists():
+        try:
+            with open(TRAINING_RECIPES_PATH, "r", encoding="utf-8") as handle:
+                loaded = json.load(handle)
+            if isinstance(loaded, list):
+                recipes.extend(_normalize_recipe(item, source="config") for item in loaded if isinstance(item, dict))
+        except Exception as exc:
+            logger.warning("Failed to load training recipes from %s: %s", TRAINING_RECIPES_PATH, exc)
+
+    if CUSTOM_RECIPES_ROOT.exists():
+        for recipe_path in sorted(CUSTOM_RECIPES_ROOT.glob("*.json")):
+            try:
+                with open(recipe_path, "r", encoding="utf-8") as handle:
+                    loaded = json.load(handle)
+                if isinstance(loaded, dict):
+                    recipe = _normalize_recipe(loaded, source="custom")
+                    recipe["file_path"] = str(recipe_path)
+                    recipes.append(recipe)
+            except Exception as exc:
+                logger.warning("Failed to load custom recipe %s: %s", recipe_path, exc)
+
+    if not recipes:
+        recipes = [_normalize_recipe(item, source="fallback") for item in TRAINING_RECIPES]
+
+    deduped: Dict[str, Dict[str, Any]] = {}
+    for recipe in recipes:
+        deduped[recipe["id"]] = recipe
+    return list(deduped.values())
+
+
+def _save_recipe_json(recipe: Dict[str, Any]) -> Dict[str, Any]:
+    _ensure_dir(CUSTOM_RECIPES_ROOT)
+    normalized = _normalize_recipe(recipe, source="custom")
+    base_id = _slugify(normalized["id"])
+    normalized["id"] = f"{base_id}-{uuid.uuid4().hex[:6]}"
+    normalized["created_at"] = _iso_now()
+    target_path = CUSTOM_RECIPES_ROOT / f"{normalized['id']}.json"
+    with open(target_path, "w", encoding="utf-8") as handle:
+        json.dump(normalized, handle, ensure_ascii=False, indent=2)
+    normalized["file_path"] = str(target_path)
+    return normalized
+
+
 def _default_state() -> Dict[str, Any]:
     now = _iso_now()
     return {
@@ -421,9 +532,14 @@ def _default_state() -> Dict[str, Any]:
                 "metrics": {"f1": 0.94, "latency_ms": 53},
                 "lineage": "EfficientNet gate -> PatchCore heatmap",
                 "training_run_id": None,
+                "base_model_version_id": None,
+                "recipe_id": "balanced-finetune-v1",
+                "gate_model_path": GATE_MODEL_PATH,
+                "heatmap_model_path": HEATMAP_MODEL_PATH,
                 "target_line": None,
             }
         ],
+        "training_recipes": deepcopy(TRAINING_RECIPES),
         "feedback_items": [],
         "logs": [
             {
@@ -480,6 +596,7 @@ def _normalize_state(state: Dict[str, Any]) -> bool:
         "architectures",
         "training_runs",
         "model_versions",
+        "training_recipes",
         "feedback_items",
         "logs",
         "deployment",
@@ -494,6 +611,9 @@ def _normalize_state(state: Dict[str, Any]) -> bool:
         changed = True
     if not state["model_versions"]:
         state["model_versions"] = deepcopy(defaults["model_versions"])
+        changed = True
+    if not state["training_recipes"]:
+        state["training_recipes"] = deepcopy(defaults["training_recipes"])
         changed = True
 
     gate_arch_default = next(
@@ -541,6 +661,22 @@ def _normalize_state(state: Dict[str, Any]) -> bool:
         changed |= _ensure(run, "notes", "")
         changed |= _ensure(run, "lineage", "EfficientNet gate -> PatchCore heatmap")
         changed |= _ensure(run, "sample_count", 0)
+        changed |= _ensure(run, "base_model_version_id", None)
+        changed |= _ensure(run, "recipe_id", "balanced-finetune-v1")
+        recipe = next(
+            (item for item in state["training_recipes"] if item.get("id") == run.get("recipe_id")),
+            state["training_recipes"][0],
+        )
+        changed |= _ensure(run, "recipe", deepcopy(recipe))
+        changed |= _ensure(run, "target_line", None)
+        changed |= _ensure(run, "progress", 0)
+        changed |= _ensure(run, "current_step", "configured")
+        changed |= _ensure(run, "started_at", None)
+        changed |= _ensure(run, "completed_at", None)
+        changed |= _ensure(run, "epochs", run.get("recipe", {}).get("default_epochs", 3) if isinstance(run.get("recipe"), dict) else 3)
+        changed |= _ensure(run, "logs", [])
+        changed |= _ensure(run, "process_id", None)
+        changed |= _ensure(run, "stop_requested", False)
 
     for model in state["model_versions"]:
         changed |= _ensure(model, "name", model.get("id", "Model"))
@@ -553,7 +689,21 @@ def _normalize_state(state: Dict[str, Any]) -> bool:
         changed |= _ensure(model, "metrics", {"f1": None, "latency_ms": None})
         changed |= _ensure(model, "lineage", "EfficientNet gate -> PatchCore heatmap")
         changed |= _ensure(model, "training_run_id", None)
+        changed |= _ensure(model, "base_model_version_id", None)
+        changed |= _ensure(model, "recipe_id", "balanced-finetune-v1")
+        changed |= _ensure(model, "gate_model_path", GATE_MODEL_PATH if model.get("status") == "production" else None)
+        changed |= _ensure(model, "heatmap_model_path", HEATMAP_MODEL_PATH if model.get("status") == "production" else None)
         changed |= _ensure(model, "target_line", None)
+
+    for recipe in state["training_recipes"]:
+        changed |= _ensure(recipe, "name", recipe.get("id", "Recipe"))
+        changed |= _ensure(recipe, "description", "")
+        changed |= _ensure(recipe, "batch_size", 16)
+        changed |= _ensure(recipe, "learning_rate", 0.0003)
+        changed |= _ensure(recipe, "optimizer", "AdamW")
+        changed |= _ensure(recipe, "epochs", 12)
+        changed |= _ensure(recipe, "weight_decay", 0.0)
+        changed |= _ensure(recipe, "scheduler", "none")
 
     for item in state["feedback_items"]:
         changed |= _ensure(item, "sample_id", "")
@@ -603,6 +753,8 @@ def _ensure_mlops_storage() -> None:
         MLOPS_ASSETS_ROOT / "feedback",
         MLOPS_ASSETS_ROOT / "uploads",
         MLOPS_ASSETS_ROOT / "architectures",
+        CUSTOM_RECIPES_ROOT,
+        TRAINING_RUNS_ROOT,
     ):
         _ensure_dir(subdir)
 
@@ -647,6 +799,13 @@ def _get_model(state: Dict[str, Any], model_version_id: str) -> Dict[str, Any]:
     return model
 
 
+def _get_recipe(state: Dict[str, Any], recipe_id: str) -> Dict[str, Any]:
+    recipe = next((item for item in _load_training_recipes() if item["id"] == recipe_id), None)
+    if recipe is None:
+        raise HTTPException(status_code=404, detail=f"Training recipe not found: {recipe_id}")
+    return recipe
+
+
 def _next_version_id(prefix: str, items: List[Dict[str, Any]]) -> str:
     today = datetime.now(KST).strftime("%Y.%m.%d")
     revision = sum(1 for item in items if str(item.get("id", "")).startswith(f"{prefix}-{today}")) + 1
@@ -673,6 +832,238 @@ def _copy_dataset_snapshot(state: Dict[str, Any], source_dataset_id: str) -> Dic
     }
     state["dataset_versions"].insert(0, snapshot)
     return snapshot
+
+
+def _create_dataset_version(
+    state: Dict[str, Any],
+    *,
+    name: str,
+    source_dataset_id: Optional[str],
+    notes: str,
+) -> Dict[str, Any]:
+    dataset = {
+        "id": _next_version_id("DATA", state["dataset_versions"]),
+        "name": name,
+        "status": "draft",
+        "created_at": _iso_now(),
+        "updated_at": _iso_now(),
+        "source_dataset_id": source_dataset_id,
+        "sample_count": 0,
+        "feedback_count": 0,
+        "samples": [],
+        "notes": notes,
+    }
+    state["dataset_versions"].insert(0, dataset)
+    return dataset
+
+
+def _asset_path_from_url(file_url: str) -> Optional[Path]:
+    if not file_url:
+        return None
+    if file_url.startswith("/mlops-assets/"):
+        return MLOPS_ASSETS_ROOT / file_url.replace("/mlops-assets/", "", 1)
+    path = Path(file_url)
+    if path.is_absolute():
+        return path
+    return None
+
+
+def _infer_dataset_round(dataset: Dict[str, Any]) -> int:
+    text = " ".join(
+        str(dataset.get(key, ""))
+        for key in ("id", "name", "source_dataset_id", "notes")
+    ).lower()
+    if "round1" in text or "v1" in text:
+        return 1
+    if "round2" in text or "v2" in text:
+        return 2
+    return 3
+
+
+def _write_dataset_training_csv(run_id: str, dataset: Dict[str, Any]) -> Optional[Path]:
+    rows: List[Dict[str, str]] = []
+    for sample in dataset.get("samples", []):
+        label = sample.get("label")
+        if label not in {"normal", "anomaly"}:
+            continue
+        path = _asset_path_from_url(sample.get("file_url", ""))
+        if path is None or not path.exists():
+            continue
+        rows.append({"path": str(path), "label": label})
+
+    if not rows:
+        return None
+
+    run_dir = TRAINING_RUNS_ROOT / run_id
+    _ensure_dir(run_dir)
+    csv_path = run_dir / "dataset.csv"
+    with open(csv_path, "w", encoding="utf-8", newline="") as handle:
+        handle.write("path,label,split\n")
+        for index, row in enumerate(rows):
+            split_bucket = index % 10
+            split = "train" if split_bucket < 7 else ("val" if split_bucket < 8 else "test")
+            handle.write(f"{row['path']},{row['label']},{split}\n")
+    return csv_path
+
+
+def _resolve_gate_model_path(model: Optional[Dict[str, Any]]) -> Optional[Path]:
+    if not model:
+        return None
+    raw_path = model.get("gate_model_path") or (GATE_MODEL_PATH if model.get("status") == "production" else None)
+    if not raw_path:
+        return None
+    path = Path(str(raw_path))
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    return path if path.exists() else None
+
+
+def _active_training_run(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    return next(
+        (
+            run
+            for run in state["training_runs"]
+            if run.get("status") in {"preparing", "running", "stopping"}
+        ),
+        None,
+    )
+
+
+def _append_run_output(run: Dict[str, Any], line: str) -> None:
+    logs = run.setdefault("logs", [])
+    logs.append({"time": _iso_now(), "message": line.rstrip()})
+    run["logs"] = logs[-120:]
+
+
+def _update_training_state(run_id: str, mutator) -> None:
+    with STATE_LOCK:
+        state = _load_state()
+        run = next((item for item in state["training_runs"] if item["id"] == run_id), None)
+        if run is None:
+            return
+        model = next(
+            (item for item in state["model_versions"] if item.get("training_run_id") == run_id),
+            None,
+        )
+        mutator(state, run, model)
+        _sync_deployment(state)
+        _save_state(state)
+
+
+def _training_worker(
+    *,
+    run_id: str,
+    model_version_id: str,
+    command: List[str],
+    model_path: Path,
+    calibrator_path: Path,
+    expected_epochs: int,
+) -> None:
+    process: Optional[subprocess.Popen] = None
+    parsed_metrics: Dict[str, float] = {}
+    try:
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        process = subprocess.Popen(
+            command,
+            cwd=str(PROJECT_ROOT),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env=env,
+        )
+        with TRAINING_JOB_LOCK:
+            TRAINING_JOBS[run_id] = process
+
+        def mark_running(state, run, model):
+            run["status"] = "running"
+            run["current_step"] = "training"
+            run["progress"] = max(int(run.get("progress", 0)), 3)
+            run["started_at"] = run.get("started_at") or _iso_now()
+            run["process_id"] = process.pid if process else None
+            if run.get("stop_requested") and process and process.poll() is None:
+                process.terminate()
+            if model:
+                model["status"] = "training"
+                model["updated_at"] = _iso_now()
+
+        _update_training_state(run_id, mark_running)
+
+        assert process.stdout is not None
+        for raw_line in process.stdout:
+            line = raw_line.rstrip()
+            if "Epoch" in line and "/" in line:
+                try:
+                    epoch_text = line.split("Epoch", 1)[1].strip().split()[0]
+                    current_epoch, total_epoch = epoch_text.split("/", 1)
+                    progress = min(92, max(5, int(int(current_epoch) / max(int(total_epoch), 1) * 90)))
+                except Exception:
+                    progress = None
+            else:
+                progress = None
+
+            if "test/f1:" in line:
+                try:
+                    parsed_metrics["f1"] = float(line.rsplit(":", 1)[1].strip())
+                except ValueError:
+                    pass
+
+            def append_line(state, run, model):
+                _append_run_output(run, line)
+                if progress is not None:
+                    run["progress"] = progress
+                    run["current_step"] = f"epoch {min(expected_epochs, max(1, int(progress / 90 * expected_epochs)))}/{expected_epochs}"
+
+            _update_training_state(run_id, append_line)
+
+        return_code = process.wait()
+
+        def finish(state, run, model):
+            stopped = bool(run.get("stop_requested"))
+            if return_code == 0 and not stopped:
+                run["status"] = "completed"
+                run["current_step"] = "completed"
+                run["progress"] = 100
+                run["completed_at"] = _iso_now()
+                if model:
+                    model["status"] = "staging"
+                    model["metrics"] = {
+                        "f1": parsed_metrics.get("f1"),
+                        "latency_ms": None,
+                    }
+                    model["gate_model_path"] = str(model_path)
+                    model["calibrator_path"] = str(calibrator_path) if calibrator_path.exists() else None
+                    model["updated_at"] = _iso_now()
+                _append_log(state, "info", f"Training run {run_id} completed.")
+            else:
+                run["status"] = "stopped" if stopped else "failed"
+                run["current_step"] = "stopped" if stopped else f"failed ({return_code})"
+                run["completed_at"] = _iso_now()
+                if model:
+                    model["status"] = "stopped" if stopped else "failed"
+                    model["updated_at"] = _iso_now()
+                level = "warning" if stopped else "error"
+                _append_log(state, level, f"Training run {run_id} {run['status']}.")
+
+        _update_training_state(run_id, finish)
+    except Exception as exc:
+        logger.exception("Training worker failed: %s", exc)
+
+        def fail(state, run, model):
+            run["status"] = "failed"
+            run["current_step"] = str(exc)
+            run["completed_at"] = _iso_now()
+            _append_run_output(run, f"[ERROR] {exc}")
+            if model:
+                model["status"] = "failed"
+                model["updated_at"] = _iso_now()
+            _append_log(state, "error", f"Training run {run_id} failed: {exc}")
+
+        _update_training_state(run_id, fail)
+    finally:
+        with TRAINING_JOB_LOCK:
+            TRAINING_JOBS.pop(run_id, None)
 
 
 def _register_sample(
@@ -723,10 +1114,38 @@ def _cascade_decision(probability: float, heatmap_score: Optional[float]) -> str
 
 class TrainRunRequest(BaseModel):
     dataset_version_id: Optional[str] = None
+    base_model_version_id: Optional[str] = None
+    recipe_id: str = "balanced-finetune-v1"
+    epochs: int = 3
     gate_architecture_id: str
     heatmap_architecture_id: str
     train_strategy: str = "cascade"
     notes: str = ""
+
+
+class RecipeSaveRequest(BaseModel):
+    id: Optional[str] = None
+    name: str
+    description: str = ""
+    gate_model: str = "effnetb0"
+    batch_size: int = 8
+    learning_rate: float = 0.0003
+    optimizer: Literal["AdamW", "Adam", "SGD"] = "AdamW"
+    weight_decay: float = 0.0
+    scheduler: Literal["cosine", "step", "none"] = "cosine"
+    early_stopping_patience: int = 5
+    default_epochs: int = 3
+
+
+class StopTrainingRequest(BaseModel):
+    run_id: Optional[str] = None
+
+
+class FeedbackDatasetRequest(BaseModel):
+    mode: Literal["append", "new"] = "append"
+    target_dataset_id: Optional[str] = None
+    dataset_name: Optional[str] = None
+    feedback_item_ids: List[str] = []
 
 
 class PromoteModelRequest(BaseModel):
@@ -914,11 +1333,12 @@ async def mlops_dashboard():
     state = _load_state()
     return {
         "active_dataset_id": state["active_dataset_id"],
-        "dataset_versions": state["dataset_versions"][:10],
+        "dataset_versions": state["dataset_versions"],
         "architectures": state["architectures"],
-        "training_runs": state["training_runs"][:10],
-        "model_versions": state["model_versions"][:10],
-        "feedback_items": state["feedback_items"][:12],
+        "training_recipes": _load_training_recipes(),
+        "training_runs": state["training_runs"][:25],
+        "model_versions": state["model_versions"],
+        "feedback_items": state["feedback_items"][:50],
         "logs": state["logs"][:20],
         "deployment": state["deployment"],
         "interfaces": {
@@ -994,12 +1414,23 @@ async def upload_dataset_files(
     source_type: Literal["bulk_upload", "field_capture", "reviewed_set"] = Form("bulk_upload"),
     line: str = Form(""),
     comment: str = Form(""),
+    dataset_mode: Literal["append", "new"] = Form("append"),
+    dataset_version_id: Optional[str] = Form(None),
+    dataset_name: str = Form(""),
 ):
     if not files:
         raise HTTPException(status_code=400, detail="No files were uploaded.")
 
     state = _load_state()
-    dataset = _get_dataset(state, state["active_dataset_id"])
+    if dataset_mode == "new":
+        dataset = _create_dataset_version(
+            state,
+            name=dataset_name or f"Uploaded Dataset {datetime.now(KST).strftime('%Y-%m-%d %H:%M')}",
+            source_dataset_id=dataset_version_id or state["active_dataset_id"],
+            notes="Created from uploaded dataset files.",
+        )
+    else:
+        dataset = _get_dataset(state, dataset_version_id or state["active_dataset_id"])
     ingest_dir = MLOPS_ASSETS_ROOT / "uploads" / datetime.now(KST).strftime("%Y%m%d") / uuid.uuid4().hex[:8]
     _ensure_dir(ingest_dir)
 
@@ -1030,6 +1461,65 @@ async def upload_dataset_files(
         "added_samples": added_samples[:12],
         "added_count": len(added_samples),
     }
+
+
+@app.post("/mlops/datasets/from-feedback")
+async def materialize_feedback_dataset(payload: FeedbackDatasetRequest):
+    state = _load_state()
+    selected_ids = set(payload.feedback_item_ids)
+    feedback_items = [
+        item
+        for item in state["feedback_items"]
+        if not selected_ids or item["id"] in selected_ids
+    ]
+    if not feedback_items:
+        raise HTTPException(status_code=400, detail="No feedback items are available.")
+
+    if payload.mode == "new":
+        dataset = _create_dataset_version(
+            state,
+            name=payload.dataset_name or f"Feedback Dataset {datetime.now(KST).strftime('%Y-%m-%d %H:%M')}",
+            source_dataset_id=payload.target_dataset_id or state["active_dataset_id"],
+            notes="Created from operator feedback items.",
+        )
+    else:
+        dataset = _get_dataset(state, payload.target_dataset_id or state["active_dataset_id"])
+
+    existing_urls = {sample.get("file_url") for sample in dataset.get("samples", [])}
+    added = 0
+    for item in feedback_items:
+        if item.get("image_url") in existing_urls:
+            continue
+        _register_sample(
+            dataset,
+            file_url=item.get("image_url", ""),
+            file_name=Path(item.get("image_url", "feedback.png")).name,
+            label=item.get("label", "unlabeled"),
+            source_type="operator_feedback",
+            feedback_type=item.get("feedback_type"),
+            comment=item.get("comment", ""),
+            line=item.get("line", ""),
+            operator=item.get("operator", ""),
+            predicted_label=item.get("predicted_label", ""),
+        )
+        added += 1
+
+    _append_log(state, "info", f"{added} feedback samples materialized into {dataset['id']}.")
+    _save_state(state)
+    return {
+        "message": f"{added} feedback samples added to {dataset['id']}.",
+        "dataset_version": dataset,
+        "added_count": added,
+    }
+
+
+@app.post("/mlops/recipes")
+async def save_training_recipe(payload: RecipeSaveRequest):
+    recipe = _save_recipe_json(payload.dict())
+    state = _load_state()
+    _append_log(state, "info", f"Training recipe JSON saved: {recipe['id']}.")
+    _save_state(state)
+    return {"message": "Recipe saved as a new JSON file.", "recipe": recipe}
 
 
 @app.post("/mlops/architectures/upload")
@@ -1066,53 +1556,173 @@ async def upload_architecture(
 
 @app.post("/mlops/train")
 async def create_training_run(payload: TrainRunRequest):
-    state = _load_state()
+    with STATE_LOCK:
+        state = _load_state()
+        active_run = _active_training_run(state)
+        if active_run:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Training is already active: {active_run['id']}",
+            )
+
     dataset_id = payload.dataset_version_id or state["active_dataset_id"]
+    recipe = _get_recipe(state, payload.recipe_id)
+    base_model = (
+        _get_model(state, payload.base_model_version_id)
+        if payload.base_model_version_id
+        else next((model for model in state["model_versions"] if model.get("status") == "production"), None)
+    )
     snapshot = _copy_dataset_snapshot(state, dataset_id)
     run_id = _next_run_id(state)
     model_version_id = _next_version_id("MODEL", state["model_versions"])
+    epochs = max(1, int(payload.epochs or recipe.get("default_epochs", 3)))
+    base_model_id = base_model["id"] if base_model else None
+    lineage = f"{base_model_id or 'fresh'} -> {payload.train_strategy} / {recipe['name']}"
+    dataset_round = _infer_dataset_round(snapshot)
+    dataset_csv = _write_dataset_training_csv(run_id, snapshot)
+    run_tag = _slugify(f"mlops-{run_id}-{recipe['gate_model']}")
+    gate_model_path = MODELS_ROOT / f"{run_tag}_gate.pt"
+    calibrator_path = MODELS_ROOT / f"{run_tag}_calibrator.pkl"
+    base_model_path = _resolve_gate_model_path(base_model)
 
     run = {
         "id": run_id,
-        "status": "configured",
+        "status": "preparing",
         "created_at": _iso_now(),
         "dataset_version_id": snapshot["id"],
         "gate_architecture_id": payload.gate_architecture_id,
         "heatmap_architecture_id": payload.heatmap_architecture_id,
         "train_strategy": payload.train_strategy,
         "notes": payload.notes,
-        "lineage": "EfficientNet gate -> PatchCore heatmap",
+        "lineage": lineage,
         "sample_count": snapshot["sample_count"],
+        "base_model_version_id": base_model_id,
+        "recipe_id": recipe["id"],
+        "recipe": deepcopy(recipe),
+        "epochs": epochs,
+        "target_line": None,
+        "progress": 0,
+        "current_step": "preparing",
+        "started_at": None,
+        "completed_at": None,
+        "logs": [],
+        "process_id": None,
+        "stop_requested": False,
+        "dataset_csv": str(dataset_csv) if dataset_csv else None,
+        "device": "cpu",
     }
     state["training_runs"].insert(0, run)
 
     model_version = {
         "id": model_version_id,
         "name": f"Cascade Candidate {model_version_id}",
-        "status": "staging",
+        "status": "training",
         "dataset_version_id": snapshot["id"],
         "gate_architecture_id": payload.gate_architecture_id,
         "heatmap_architecture_id": payload.heatmap_architecture_id,
         "created_at": _iso_now(),
         "updated_at": _iso_now(),
         "metrics": {"f1": None, "latency_ms": None},
-        "lineage": "EfficientNet gate -> PatchCore heatmap",
+        "lineage": lineage,
         "training_run_id": run_id,
+        "base_model_version_id": base_model_id,
+        "recipe_id": recipe["id"],
+        "gate_model_path": str(gate_model_path),
+        "heatmap_model_path": base_model.get("heatmap_model_path") if base_model else HEATMAP_MODEL_PATH,
         "target_line": None,
     }
     state["model_versions"].insert(0, model_version)
-    state["deployment"]["last_action"] = "train_created"
+    state["deployment"]["last_action"] = "training_started"
     state["deployment"]["last_action_at"] = _iso_now()
     _sync_deployment(state)
-    _append_log(state, "info", f"Training run {run_id} created from dataset snapshot {snapshot['id']}.")
+    _append_log(
+        state,
+        "info",
+        f"Training run {run_id} started on CPU from {snapshot['id']} with recipe {recipe['id']}.",
+    )
     _save_state(state)
 
+    command = [
+        sys.executable,
+        "-m",
+        "src.train_gate",
+        "--round",
+        str(dataset_round),
+        "--gate",
+        recipe.get("gate_model", "effnetb0"),
+        "--device",
+        "cpu",
+        "--batch_size",
+        str(recipe.get("batch_size", 8)),
+        "--lr",
+        str(recipe.get("learning_rate", 0.0003)),
+        "--epochs",
+        str(epochs),
+        "--optimizer",
+        str(recipe.get("optimizer", "AdamW")),
+        "--weight_decay",
+        str(recipe.get("weight_decay", 0.0)),
+        "--scheduler",
+        str(recipe.get("scheduler", "cosine")),
+        "--run_tag",
+        run_tag,
+    ]
+    if dataset_csv:
+        command.extend(["--csv_path", str(dataset_csv)])
+    if base_model_path:
+        command.extend(["--base_model_path", str(base_model_path)])
+
+    thread = threading.Thread(
+        target=_training_worker,
+        kwargs={
+            "run_id": run_id,
+            "model_version_id": model_version_id,
+            "command": command,
+            "model_path": gate_model_path,
+            "calibrator_path": calibrator_path,
+            "expected_epochs": epochs,
+        },
+        daemon=True,
+    )
+    thread.start()
+
     return {
-        "message": "Training run configured. Dataset snapshot and staging model version were created.",
+        "message": "CPU training started.",
         "training_run": run,
         "dataset_snapshot": snapshot,
         "model_version": model_version,
     }
+
+
+@app.post("/mlops/train/stop")
+async def stop_training_run(payload: StopTrainingRequest):
+    state = _load_state()
+    run_id = payload.run_id
+    if not run_id:
+        active = _active_training_run(state)
+        run_id = active["id"] if active else None
+    if not run_id:
+        raise HTTPException(status_code=400, detail="No active training run is available.")
+
+    run = next((item for item in state["training_runs"] if item["id"] == run_id), None)
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"Training run not found: {run_id}")
+    if run.get("status") not in {"preparing", "running", "stopping"}:
+        raise HTTPException(status_code=400, detail=f"Training run is not active: {run_id}")
+
+    run["status"] = "stopping"
+    run["current_step"] = "stop requested"
+    run["stop_requested"] = True
+    _append_run_output(run, "[SYSTEM] Stop requested by operator.")
+    _append_log(state, "warning", f"Stop requested for training run {run_id}.")
+    _save_state(state)
+
+    with TRAINING_JOB_LOCK:
+        process = TRAINING_JOBS.get(run_id)
+    if process and process.poll() is None:
+        process.terminate()
+
+    return {"message": "Stop requested.", "training_run": run}
 
 
 @app.post("/mlops/deployments/canary")
@@ -1122,6 +1732,8 @@ async def start_canary(payload: CanaryRequest):
 
     if target["status"] == "production":
         raise HTTPException(status_code=400, detail="Production model cannot be re-used as a canary candidate.")
+    if target["status"] not in {"staging", "canary"}:
+        raise HTTPException(status_code=400, detail=f"Model is not deployable yet: {target['status']}")
 
     for model in state["model_versions"]:
         if model["id"] != target["id"] and model.get("status") == "canary":
@@ -1151,6 +1763,8 @@ async def promote_model(payload: PromoteModelRequest):
     target = _get_model(state, payload.model_version_id)
 
     if payload.target_status == "production":
+        if target.get("status") not in {"staging", "canary", "production"}:
+            raise HTTPException(status_code=400, detail=f"Model is not deployable yet: {target['status']}")
         current_production = next(
             (model for model in state["model_versions"] if model.get("status") == "production"),
             None,

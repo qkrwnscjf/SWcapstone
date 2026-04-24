@@ -169,21 +169,23 @@ def get_eval_transforms(input_size: int = 224) -> T.Compose:
 # ---------------------------------------------------------------------------
 # Model builder
 # ---------------------------------------------------------------------------
-def build_gate_model(gate_name: str, num_classes: int = 1) -> nn.Module:
+def build_gate_model(gate_name: str, num_classes: int = 1, pretrained: bool = True) -> nn.Module:
     """Build a pretrained backbone with a custom classifier head.
 
     Output is single logit for BCEWithLogitsLoss.
     """
     if gate_name == "effnetb0":
-        model = models.efficientnet_b0(weights=models.EfficientNet_B0_Weights.DEFAULT)
+        weights = models.EfficientNet_B0_Weights.DEFAULT if pretrained else None
+        model = models.efficientnet_b0(weights=weights)
         in_features = model.classifier[1].in_features
         model.classifier = nn.Sequential(
             nn.Dropout(p=0.2, inplace=True),
             nn.Linear(in_features, num_classes),
         )
     elif gate_name == "mnv3_large":
+        weights = models.MobileNet_V3_Large_Weights.DEFAULT if pretrained else None
         model = models.mobilenet_v3_large(
-            weights=models.MobileNet_V3_Large_Weights.DEFAULT
+            weights=weights
         )
         in_features = model.classifier[0].in_features
         model.classifier = nn.Sequential(
@@ -321,6 +323,9 @@ def compute_metrics(
 
     Returns (metrics_dict, optimal_threshold).
     """
+    if len(y_true) == 0:
+        return {}, 0.5
+
     auroc = roc_auc_score(y_true, probs)
     auprc = average_precision_score(y_true, probs)
 
@@ -627,6 +632,33 @@ def parse_args() -> argparse.Namespace:
         help="Number of epochs (overrides config)",
     )
     parser.add_argument(
+        "--optimizer",
+        type=str,
+        choices=["AdamW", "Adam", "SGD"],
+        help="Optimizer name (overrides config)",
+    )
+    parser.add_argument(
+        "--weight_decay",
+        type=float,
+        help="Weight decay (overrides config)",
+    )
+    parser.add_argument(
+        "--scheduler",
+        type=str,
+        choices=["cosine", "step", "none"],
+        help="Scheduler type (overrides config)",
+    )
+    parser.add_argument(
+        "--run_tag",
+        type=str,
+        help="Unique run tag used for model/report artifact filenames",
+    )
+    parser.add_argument(
+        "--base_model_path",
+        type=str,
+        help="Optional existing gate checkpoint to fine-tune from",
+    )
+    parser.add_argument(
         "--csv_path",
         type=str,
         help="Path to CSV file (can contain all splits) or directory",
@@ -654,8 +686,9 @@ def main() -> None:
     epochs = args.epochs if args.epochs is not None else gate_cfg["epochs"]
     lr = args.lr if args.lr is not None else gate_cfg["lr"]
     
-    weight_decay = gate_cfg["weight_decay"]
-    scheduler_type = gate_cfg.get("scheduler", "cosine")
+    optimizer_name = args.optimizer if args.optimizer is not None else gate_cfg.get("optimizer", "AdamW")
+    weight_decay = args.weight_decay if args.weight_decay is not None else gate_cfg["weight_decay"]
+    scheduler_type = args.scheduler if args.scheduler is not None else gate_cfg.get("scheduler", "cosine")
     pos_weight_auto = gate_cfg.get("pos_weight_auto", True)
     early_stopping_patience = gate_cfg.get("early_stopping_patience", 7)
 
@@ -677,7 +710,7 @@ def main() -> None:
     num_workers = cfg.get("training", {}).get("num_workers", 0)
 
     rnd = args.round
-    run_tag = f"round{rnd}_{args.gate}"
+    run_tag = args.run_tag or f"round{rnd}_{args.gate}"
 
     print("=" * 60)
     print(f"Gate Model Training Pipeline")
@@ -687,7 +720,10 @@ def main() -> None:
     print(f"  batch_size  : {batch_size}")
     print(f"  epochs      : {epochs}")
     print(f"  lr          : {lr}")
+    print(f"  optimizer   : {optimizer_name}")
+    print(f"  weight_decay: {weight_decay}")
     print(f"  scheduler   : {scheduler_type}")
+    print(f"  run_tag     : {run_tag}")
     print(f"  seed        : {seed}")
     print("=" * 60)
 
@@ -748,11 +784,28 @@ def main() -> None:
     criterion = nn.BCEWithLogitsLoss(pos_weight=pw)
 
     # ---- Build model ----
-    model = build_gate_model(args.gate, num_classes=1)
+    model = build_gate_model(args.gate, num_classes=1, pretrained=not bool(args.base_model_path))
+    if args.base_model_path:
+        base_path = Path(args.base_model_path)
+        if base_path.exists():
+            checkpoint = torch.load(base_path, map_location="cpu", weights_only=False)
+            state_dict = checkpoint.get("model_state_dict", checkpoint)
+            missing, unexpected = model.load_state_dict(state_dict, strict=False)
+            print(
+                f"Loaded base checkpoint: {base_path} "
+                f"(missing={len(missing)}, unexpected={len(unexpected)})"
+            )
+        else:
+            print(f"[WARN] Base checkpoint not found, starting from pretrained backbone: {base_path}")
     model = model.to(device)
 
     # ---- Optimizer & Scheduler ----
-    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    if optimizer_name == "Adam":
+        optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+    elif optimizer_name == "SGD":
+        optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=weight_decay)
+    else:
+        optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
 
     if scheduler_type == "cosine":
         scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
@@ -781,6 +834,7 @@ def main() -> None:
         mlflow.log_param("batch_size", batch_size)
         mlflow.log_param("epochs", epochs)
         mlflow.log_param("lr", lr)
+        mlflow.log_param("optimizer", optimizer_name)
         mlflow.log_param("weight_decay", weight_decay)
         mlflow.log_param("scheduler", scheduler_type)
         mlflow.log_param("pos_weight_auto", pos_weight_auto)
@@ -858,27 +912,32 @@ def main() -> None:
         print("\n--- Calibration on val set ---")
         _, _, val_probs, val_labels = evaluate(model, val_dl, criterion, device)
 
-        # Try each calibration method, pick the best
         best_calibrator = None
         best_cal_name = "none"
-        best_cal_auroc = roc_auc_score(val_labels, val_probs)
-        print(f"  Uncalibrated val AUROC: {best_cal_auroc:.4f}")
+        best_cal_auroc = 0.0
 
-        for cal_method in cal_methods:
-            try:
-                calibrator = build_calibrator(cal_method)
-                if calibrator is None:
-                    continue
-                calibrator.fit(val_probs, val_labels)
-                cal_probs = calibrator.predict_proba(val_probs)
-                cal_auroc = roc_auc_score(val_labels, cal_probs)
-                print(f"  {cal_method} val AUROC: {cal_auroc:.4f}")
-                if cal_auroc > best_cal_auroc:
-                    best_cal_auroc = cal_auroc
-                    best_calibrator = calibrator
-                    best_cal_name = cal_method
-            except Exception as e:
-                print(f"  [WARN] Calibration '{cal_method}' failed: {e}")
+        if len(val_labels) > 0 and len(np.unique(val_labels)) >= 2:
+            # Try each calibration method, pick the best
+            best_cal_auroc = roc_auc_score(val_labels, val_probs)
+            print(f"  Uncalibrated val AUROC: {best_cal_auroc:.4f}")
+
+            for cal_method in cal_methods:
+                try:
+                    calibrator = build_calibrator(cal_method)
+                    if calibrator is None:
+                        continue
+                    calibrator.fit(val_probs, val_labels)
+                    cal_probs = calibrator.predict_proba(val_probs)
+                    cal_auroc = roc_auc_score(val_labels, cal_probs)
+                    print(f"  {cal_method} val AUROC: {cal_auroc:.4f}")
+                    if cal_auroc > best_cal_auroc:
+                        best_cal_auroc = cal_auroc
+                        best_calibrator = calibrator
+                        best_cal_name = cal_method
+                except Exception as e:
+                    print(f"  [WARN] Calibration '{cal_method}' failed: {e}")
+        else:
+            print("  [WARN] Val set empty or single-class; skipping calibration.")
 
         print(f"  Selected calibration: {best_cal_name}")
         mlflow.log_param("calibration_method", best_cal_name)
@@ -896,7 +955,7 @@ def main() -> None:
         else:
             test_probs = test_probs_raw
 
-        if len(np.unique(test_labels)) >= 2:
+        if len(test_labels) > 0 and len(np.unique(test_labels)) >= 2:
             test_metrics, opt_thr = compute_metrics(test_labels, test_probs)
             for k, v in test_metrics.items():
                 mlflow.log_metric(f"test/{k}", v)
@@ -921,7 +980,7 @@ def main() -> None:
 
         # ---- Threshold Sweep on test set ----
         print("\n--- Threshold Sweep ---")
-        if len(np.unique(test_labels)) >= 2:
+        if len(test_labels) > 0 and len(np.unique(test_labels)) >= 2:
             best_thresholds, sweep_df = threshold_sweep(
                 y_true=test_labels,
                 probs=test_probs,

@@ -1,0 +1,41 @@
+[
+  {
+    "id": "cpu-balanced-effnetb0",
+    "name": "CPU Balanced EfficientNet",
+    "description": "Stable CPU recipe for regular fine-tuning from an existing gate model.",
+    "gate_model": "effnetb0",
+    "batch_size": 8,
+    "learning_rate": 0.0003,
+    "optimizer": "AdamW",
+    "weight_decay": 0.01,
+    "scheduler": "cosine",
+    "early_stopping_patience": 5,
+    "default_epochs": 3
+  },
+  {
+    "id": "cpu-fast-smoke",
+    "name": "CPU Fast Smoke Test",
+    "description": "Short recipe to verify the training pipeline before a longer run.",
+    "gate_model": "effnetb0",
+    "batch_size": 4,
+    "learning_rate": 0.001,
+    "optimizer": "Adam",
+    "weight_decay": 0.0,
+    "scheduler": "step",
+    "early_stopping_patience": 2,
+    "default_epochs": 1
+  },
+  {
+    "id": "cpu-low-lr-recovery",
+    "name": "CPU Low-LR Recovery",
+    "description": "Conservative fine-tuning recipe for sensitive production baselines.",
+    "gate_model": "effnetb0",
+    "batch_size": 12,
+    "learning_rate": 0.0001,
+    "optimizer": "AdamW",
+    "weight_decay": 0.02,
+    "scheduler": "cosine",
+    "early_stopping_patience": 6,
+    "default_epochs": 5
+  }
+]

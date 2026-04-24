@@ -311,6 +311,9 @@ def compute_metrics(
 
     Returns (metrics_dict, optimal_threshold).
     """
+    if len(y_true) == 0:
+        return {}, 0.5
+
     auroc = roc_auc_score(y_true, scores)
     auprc = average_precision_score(y_true, scores)
 
@@ -471,7 +474,7 @@ def evaluate_split(
     scores, labels, paths, heatmaps = model.predict(dl)
 
     # Handle case where only one class present
-    if len(np.unique(labels)) < 2:
+    if len(labels) == 0 or len(np.unique(labels)) < 2:
         print(f"  [WARN] Only one class in {split_name}; skipping metric computation.")
         return {}
 

@@ -1,4 +1,4 @@
-import type { DashboardResponse, ModelVersion } from "../types/mlops";
+import type { DashboardResponse, ModelVersion, TrainingRecipe } from "../types/mlops";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8000";
 
@@ -53,6 +53,9 @@ export function uploadDatasetFiles(payload: {
   sourceType: string;
   line: string;
   comment: string;
+  datasetMode?: "append" | "new";
+  datasetVersionId?: string;
+  datasetName?: string;
 }) {
   const form = new FormData();
   payload.files.forEach((file) =>
@@ -66,7 +69,28 @@ export function uploadDatasetFiles(payload: {
   form.append("source_type", payload.sourceType);
   form.append("line", payload.line);
   form.append("comment", payload.comment);
+  form.append("dataset_mode", payload.datasetMode || "append");
+  form.append("dataset_version_id", payload.datasetVersionId || "");
+  form.append("dataset_name", payload.datasetName || "");
   return request("/mlops/datasets/upload", { method: "POST", body: form });
+}
+
+export function materializeFeedbackDataset(payload: {
+  mode: "append" | "new";
+  targetDatasetId?: string;
+  datasetName?: string;
+  feedbackItemIds?: string[];
+}) {
+  return request("/mlops/datasets/from-feedback", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      mode: payload.mode,
+      target_dataset_id: payload.targetDatasetId || null,
+      dataset_name: payload.datasetName || null,
+      feedback_item_ids: payload.feedbackItemIds || [],
+    }),
+  });
 }
 
 export function uploadArchitecture(payload: {
@@ -83,6 +107,10 @@ export function uploadArchitecture(payload: {
 
 export function createTrainingRun(payload: {
   datasetVersionId?: string;
+  baseModelVersionId?: string | null;
+  recipeId?: string;
+  epochs?: number;
+  targetLine?: string | null;
   gateArchitectureId: string;
   heatmapArchitectureId: string;
   trainStrategy: string;
@@ -93,6 +121,9 @@ export function createTrainingRun(payload: {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       dataset_version_id: payload.datasetVersionId || null,
+      base_model_version_id: payload.baseModelVersionId || null,
+      recipe_id: payload.recipeId || "balanced-finetune-v1",
+      epochs: payload.epochs || 3,
       gate_architecture_id: payload.gateArchitectureId,
       heatmap_architecture_id: payload.heatmapArchitectureId,
       train_strategy: payload.trainStrategy,
@@ -109,6 +140,24 @@ export function promoteModel(modelVersionId: string, targetStatus: "staging" | "
       model_version_id: modelVersionId,
       target_status: targetStatus,
     }),
+  });
+}
+
+export function stopTrainingRun(runId?: string) {
+  return request("/mlops/train/stop", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      run_id: runId || null,
+    }),
+  });
+}
+
+export function saveTrainingRecipe(payload: Omit<TrainingRecipe, "source" | "file_path">) {
+  return request<{ recipe: TrainingRecipe }>("/mlops/recipes", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
   });
 }
 

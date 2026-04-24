@@ -38,17 +38,46 @@ export type Architecture = {
   file_url: string | null;
 };
 
+export type TrainingRecipe = {
+  id: string;
+  name: string;
+  description: string;
+  gate_model: string;
+  batch_size: number;
+  learning_rate: number;
+  optimizer: string;
+  epochs?: number;
+  weight_decay: number;
+  scheduler: string;
+  early_stopping_patience: number;
+  default_epochs: number;
+  source?: string;
+  file_path?: string;
+};
+
 export type TrainingRun = {
   id: string;
   status: string;
   created_at: string;
   dataset_version_id: string;
+  base_model_version_id?: string | null;
   gate_architecture_id: string;
   heatmap_architecture_id: string;
+  recipe_id?: string;
+  recipe?: TrainingRecipe;
+  target_line?: string | null;
+  epochs?: number;
   train_strategy: string;
   notes: string;
   lineage: string;
   sample_count: number;
+  progress?: number;
+  current_step?: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+  logs?: Array<{ time: string; message: string }>;
+  device?: string;
+  stop_requested?: boolean;
 };
 
 export type ModelVersion = {
@@ -66,6 +95,11 @@ export type ModelVersion = {
   };
   lineage: string;
   training_run_id?: string;
+  base_model_version_id?: string | null;
+  recipe_id?: string;
+  gate_model_path?: string | null;
+  heatmap_model_path?: string | null;
+  calibrator_path?: string | null;
   target_line?: string | null;
 };
 
@@ -104,6 +138,7 @@ export type DashboardResponse = {
   active_dataset_id: string;
   dataset_versions: DatasetVersion[];
   architectures: Architecture[];
+  training_recipes: TrainingRecipe[];
   training_runs: TrainingRun[];
   model_versions: ModelVersion[];
   feedback_items: FeedbackItem[];

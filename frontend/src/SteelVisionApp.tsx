@@ -9,7 +9,7 @@ type Audience = "field" | "admin" | "summary";
 type AdminTab = "ops" | "train" | "version" | "logs";
 const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8000";
 const cx = (...v: Array<string | false | undefined>) => v.filter(Boolean).join(" ");
-const dt = (v?: string | null) => (v ? new Date(v).toLocaleString("ko-KR") : "-");
+const dt = (v?: string | null) => (v ? new Date(v).toLocaleString("ko-KR", { timeZone: "Asia/Seoul" }) : "-");
 const asset = (p: string) => (p.startsWith("http") ? p : `${API_BASE}${p}`);
 
 function Card({ children, dark = false }: { children: React.ReactNode; dark?: boolean }) {

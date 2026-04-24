@@ -59,12 +59,14 @@ export type ModelVersion = {
   gate_architecture_id: string;
   heatmap_architecture_id: string;
   created_at: string;
+  updated_at?: string;
   metrics: {
     f1: number | null;
     latency_ms: number | null;
   };
   lineage: string;
   training_run_id?: string;
+  target_line?: string | null;
 };
 
 export type FeedbackItem = {
@@ -88,6 +90,16 @@ export type LogItem = {
   message: string;
 };
 
+export type DeploymentState = {
+  production_model_id: string | null;
+  staging_model_id: string | null;
+  canary_model_id: string | null;
+  canary_line: string | null;
+  previous_production_model_id?: string | null;
+  last_action?: string | null;
+  last_action_at?: string | null;
+};
+
 export type DashboardResponse = {
   active_dataset_id: string;
   dataset_versions: DatasetVersion[];
@@ -96,5 +108,6 @@ export type DashboardResponse = {
   model_versions: ModelVersion[];
   feedback_items: FeedbackItem[];
   logs: LogItem[];
+  deployment: DeploymentState;
   interfaces: Record<string, string>;
 };

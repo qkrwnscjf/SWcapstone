@@ -36,3 +36,6 @@ artifacts/*
 final_dataset/
 mlruns/
 backend/models/
+
+# data version control 내용 제외
+storage/mlops/

@@ -111,3 +111,24 @@ export function promoteModel(modelVersionId: string, targetStatus: "staging" | "
     }),
   });
 }
+
+export function startCanary(modelVersionId: string, line: string) {
+  return request<{ model_version: ModelVersion }>("/mlops/deployments/canary", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model_version_id: modelVersionId,
+      line,
+    }),
+  });
+}
+
+export function rollbackDeployment(modelVersionId?: string) {
+  return request<{ model_version: ModelVersion }>("/mlops/deployments/rollback", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model_version_id: modelVersionId || null,
+    }),
+  });
+}

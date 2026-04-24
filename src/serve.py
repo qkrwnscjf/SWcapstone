@@ -1,47 +1,34 @@
 #!/usr/bin/env python3
-"""
-FastAPI serving endpoint implementing the Gate-Heatmap cascade logic.
-
-핵심 수정 사항
--------------
-1. GateModel.load() 사용 안 함
-   -> train_gate.py의 build_gate_model()과 동일한 구조로 직접 로드
-
-2. gate checkpoint 안의 T_low / T_high 사용
-   -> 서빙에서 하드코딩 threshold 제거
-
-3. calibrator(.pkl) 자동 로드
-   -> 학습 시 저장한 calibration 반영
-
-4. heatmap 출력 계약 통일
-   -> PatchCoreModel.predict() 결과(dict)를 그대로 받아 anomaly_score / overlay 사용
-
-5. Gate score / threshold / call 여부 로그 강화
-"""
-
 from __future__ import annotations
 
 import io
-import os
-import time
-import pickle
+import json
 import logging
+import os
+import pickle
+import shutil
+import sys
+import time
+import uuid
+from copy import deepcopy
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Literal, Optional
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import torch
 import torch.nn as nn
-from PIL import Image
-from fastapi import FastAPI, File, UploadFile, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from torchvision import transforms, models
+from fastapi.staticfiles import StaticFiles
+from PIL import Image
+from pydantic import BaseModel
+from sklearn.isotonic import IsotonicRegression
+from sklearn.linear_model import LogisticRegression
+from torchvision import models, transforms
 
 from src.heatmap_model import PatchCoreModel
-
-from sklearn.linear_model import LogisticRegression
-from sklearn.isotonic import IsotonicRegression
 
 
 class PlattCalibrator:
@@ -64,265 +51,288 @@ class IsotonicCalibrator:
 
     def predict_proba(self, probs):
         return self.ir.predict(probs)
-    
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
+
+
+sys.modules["__main__"].PlattCalibrator = PlattCalibrator
+sys.modules["__main__"].IsotonicCalibrator = IsotonicCalibrator
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
-logger = logging.getLogger("cascade_serve")
+logger = logging.getLogger("steelvision")
+KST = ZoneInfo("Asia/Seoul")
 
-# ---------------------------------------------------------------------------
-# Paths / env helpers
-# ---------------------------------------------------------------------------
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+def _resolve_project_root() -> Path:
+    current = Path(__file__).resolve()
+    candidates = [current.parent.parent]
+    try:
+        candidates.append(current.parents[2])
+    except IndexError:
+        pass
+
+    for candidate in candidates:
+        if (candidate / "models").exists():
+            return candidate
+    return candidates[0]
+
+
+PROJECT_ROOT = _resolve_project_root()
+MLOPS_ROOT = PROJECT_ROOT / "storage" / "mlops"
+MLOPS_ASSETS_ROOT = MLOPS_ROOT / "assets"
+MLOPS_STATE_PATH = MLOPS_ROOT / "state.json"
+MLOPS_ASSETS_ROOT.mkdir(parents=True, exist_ok=True)
+
+
+def _has_mps() -> bool:
+    return bool(getattr(torch.backends, "mps", None)) and torch.backends.mps.is_available()
+
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else ("mps" if _has_mps() else "cpu"))
 
 
 def _env_float(key: str, default: float) -> float:
     return float(os.getenv(key, str(default)))
 
 
-def _env_bool(key: str, default: bool) -> bool:
-    val = os.getenv(key, str(default)).lower()
-    return val in ("true", "1", "yes")
-
-
 def _env_str(key: str, default: str) -> str:
     return os.getenv(key, default)
 
 
-# ---------------------------------------------------------------------------
-# Override flags
-# ---------------------------------------------------------------------------
-OVERRIDE_QUALITY_LOW: bool = _env_bool("OVERRIDE_QUALITY_LOW", False)
-OVERRIDE_DRIFT_SUSPECTED: bool = _env_bool("OVERRIDE_DRIFT_SUSPECTED", False)
-OVERRIDE_CRITICAL_LINE: bool = _env_bool("OVERRIDE_CRITICAL_LINE", False)
+def _iso_now() -> str:
+    return datetime.now(KST).isoformat(timespec="seconds")
 
-GATE_MODEL_PATH: str = _env_str(
+
+def _ensure_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def _slugify(value: str) -> str:
+    slug = "".join(ch.lower() if ch.isalnum() else "-" for ch in value.strip())
+    while "--" in slug:
+        slug = slug.replace("--", "-")
+    return slug.strip("-") or "artifact"
+
+
+def _public_asset_url(path: Path) -> str:
+    return f"/mlops-assets/{path.relative_to(MLOPS_ASSETS_ROOT).as_posix()}"
+
+
+def _np_to_base64_png(arr: np.ndarray) -> str:
+    import base64
+
+    if arr.dtype != np.uint8:
+        arr_max = float(np.max(arr)) if arr.size else 0.0
+        if arr_max <= 1.0:
+            arr = (np.clip(arr, 0.0, 1.0) * 255).astype(np.uint8)
+        else:
+            arr = np.clip(arr, 0.0, 255.0).astype(np.uint8)
+
+    if arr.ndim == 2:
+        image = Image.fromarray(arr, mode="L")
+    elif arr.ndim == 3 and arr.shape[2] == 4:
+        image = Image.fromarray(arr, mode="RGBA")
+    elif arr.ndim == 3 and arr.shape[2] == 3:
+        image = Image.fromarray(arr, mode="RGB")
+    else:
+        raise ValueError(f"Unsupported image shape: {arr.shape}")
+
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+
+GATE_MODEL_PATH = _env_str(
     "GATE_MODEL_PATH",
-    str(PROJECT_ROOT / "models" / "round1_effnetb0_gate.pt"),
+    str(PROJECT_ROOT / "models" / "round3_effnetb0_gate.pt"),
 )
-HEATMAP_MODEL_PATH: str = _env_str(
+HEATMAP_MODEL_PATH = _env_str(
     "HEATMAP_MODEL_PATH",
-    str(PROJECT_ROOT / "models" / "round1_patchcore_r18_patchcore.pt"),
+    str(PROJECT_ROOT / "models" / "round3_patchcore_r18_patchcore.pt"),
 )
 
-DEVICE = torch.device(
-    "cuda" if torch.cuda.is_available()
-    else ("mps" if torch.backends.mps.is_available() else "cpu")
-)
-
-# ---------------------------------------------------------------------------
-# Runtime thresholds
-#   실제 값은 startup에서 gate checkpoint로부터 덮어씀
-# ---------------------------------------------------------------------------
-T_LOW: float = 0.3
-T_HIGH: float = 0.7
-
-# ---------------------------------------------------------------------------
-# Image preprocessing
-#   기본값 224. startup에서 gate checkpoint의 input_size를 반영해 갱신 가능
-# ---------------------------------------------------------------------------
+T_LOW = 0.3
+T_HIGH = 0.7
 INPUT_SIZE = 224
 
 
 def build_preprocess(input_size: int) -> transforms.Compose:
-    return transforms.Compose([
-        transforms.Resize((input_size, input_size)),
-        transforms.ToTensor(),
-        transforms.Normalize(
-            mean=[0.485, 0.456, 0.406],
-            std=[0.229, 0.224, 0.225],
-        ),
-    ])
+    return transforms.Compose(
+        [
+            transforms.Resize((input_size, input_size)),
+            transforms.ToTensor(),
+            transforms.Normalize(
+                mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225],
+            ),
+        ]
+    )
 
 
 _preprocess = build_preprocess(INPUT_SIZE)
 
 
 def preprocess_image(image_bytes: bytes) -> torch.Tensor:
-    """Read raw bytes -> PIL -> preprocessed tensor [1, C, H, W]."""
-    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    tensor = _preprocess(img).unsqueeze(0)
+    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    tensor = _preprocess(image).unsqueeze(0)
     return tensor.to(DEVICE)
 
 
-# ---------------------------------------------------------------------------
-# Gate model builder (train_gate.py와 동일 구조)
-# ---------------------------------------------------------------------------
-def build_gate_model(gate_name: str, num_classes: int = 1) -> nn.Module:
-    if gate_name == "effnetb0":
-        model = models.efficientnet_b0(
-            weights=models.EfficientNet_B0_Weights.DEFAULT
-        )
-        in_features = model.classifier[1].in_features
-        model.classifier = nn.Sequential(
-            nn.Dropout(p=0.2, inplace=True),
-            nn.Linear(in_features, num_classes),
-        )
-    elif gate_name == "mnv3_large":
-        model = models.mobilenet_v3_large(
-            weights=models.MobileNet_V3_Large_Weights.DEFAULT
-        )
+def _normalize_gate_name(gate_name: str) -> str:
+    return gate_name.strip().lower().replace("-", "").replace("_", "")
+
+
+def _build_effnet_gate_model() -> nn.Module:
+    model = models.efficientnet_b0(weights=None)
+    in_features = model.classifier[1].in_features
+    model.classifier = nn.Sequential(
+        nn.Dropout(p=0.2, inplace=True),
+        nn.Linear(in_features, 1),
+    )
+    return model
+
+
+def _build_legacy_effnet_gate_model() -> nn.Module:
+    model = models.efficientnet_b0(weights=None)
+    model.classifier[1] = nn.Linear(model.classifier[1].in_features, 1)
+    return model
+
+
+def build_gate_model(gate_name: str) -> nn.Module:
+    normalized = _normalize_gate_name(gate_name)
+
+    if normalized in {"effnetb0", "efficientnetb0"}:
+        return _build_effnet_gate_model()
+
+    if normalized in {"mnv3large", "mobilenetv3large"}:
+        model = models.mobilenet_v3_large(weights=None)
         in_features = model.classifier[0].in_features
         model.classifier = nn.Sequential(
             nn.Linear(in_features, 1280),
             nn.Hardswish(inplace=True),
             nn.Dropout(p=0.2, inplace=True),
-            nn.Linear(1280, num_classes),
+            nn.Linear(1280, 1),
         )
-    else:
-        raise ValueError(f"Unsupported gate model: {gate_name}")
+        return model
 
-    return model
+    raise ValueError(f"Unsupported gate model: {gate_name}")
+
 
 def load_gate_checkpoint(model_path: str, device: torch.device) -> Dict[str, Any]:
-    """train_gate.py에서 저장한 checkpoint를 직접 로드."""
     ckpt = torch.load(model_path, map_location=device, weights_only=False)
+    model_state = ckpt.get("model_state_dict")
+    if not isinstance(model_state, dict):
+        raise ValueError(f"Checkpoint does not contain model_state_dict: {model_path}")
 
-    gate_name = ckpt.get("gate_name")
-    if gate_name is None:
-        raise ValueError(f"'gate_name' not found in checkpoint: {model_path}")
-
-    model = build_gate_model(gate_name, num_classes=1)
-
+    gate_name = str(ckpt.get("gate_name") or ckpt.get("backbone") or "effnetb0")
+    builders: List[tuple[str, nn.Module]] = []
     try:
-        model.load_state_dict(ckpt["model_state_dict"], strict=True)
-        logger.info("Gate checkpoint loaded with strict=True")
-    except Exception as e:
-        logger.warning("strict=True load failed: %s", e)
-        missing, unexpected = model.load_state_dict(
-            ckpt["model_state_dict"], strict=False
-        )
-        logger.warning("Gate load missing keys: %s", missing)
-        logger.warning("Gate load unexpected keys: %s", unexpected)
+        builders.append((gate_name, build_gate_model(gate_name)))
+    except ValueError:
+        builders.append(("effnetb0", _build_effnet_gate_model()))
 
-    model.to(device)
-    model.eval()
+    if _normalize_gate_name(gate_name) in {"effnetb0", "efficientnetb0"}:
+        builders.append(("effnetb0-legacy", _build_legacy_effnet_gate_model()))
+
+    loaded_model: Optional[nn.Module] = None
+    load_errors: List[str] = []
+    for builder_name, candidate in builders:
+        try:
+            candidate.load_state_dict(model_state, strict=True)
+            loaded_model = candidate
+            gate_name = builder_name
+            break
+        except Exception as exc:
+            load_errors.append(f"{builder_name}: {exc}")
+
+    if loaded_model is None:
+        raise ValueError(" / ".join(load_errors))
+
+    loaded_model.to(device)
+    loaded_model.eval()
+
+    input_size_value = ckpt.get("input_size", 224)
+    if isinstance(input_size_value, (list, tuple)):
+        input_size = int(input_size_value[0])
+    else:
+        input_size = int(input_size_value)
 
     bundle = {
-        "model": model,
+        "model": loaded_model,
         "gate_name": gate_name,
         "backbone": ckpt.get("backbone", gate_name),
-        "input_size": int(ckpt.get("input_size", 224)),
+        "input_size": input_size,
         "T_low": float(ckpt.get("T_low", 0.3)),
         "T_high": float(ckpt.get("T_high", 0.7)),
         "checkpoint_path": model_path,
     }
     return bundle
 
-def load_gate_calibrator(cal_path: Optional[str]) -> Optional[Any]:
-    if cal_path is None:
-        logger.info("No calibrator file found for gate model.")
-        return None
-
-    try:
-        with open(cal_path, "rb") as f:
-            obj = pickle.load(f)
-
-        calibrator = obj.get("calibrator", None)
-        method = obj.get("method", "unknown")
-        logger.info("Loaded gate calibrator from %s (method=%s)", cal_path, method)
-        return calibrator
-
-    except Exception as e:
-        logger.warning(
-            "Failed to load gate calibrator from %s. Proceeding without calibration. Error: %s",
-            cal_path,
-            e,
-        )
-        return None
 
 def find_calibrator_path(gate_model_path: str) -> Optional[str]:
-    """
-    예:
-      round1_effnetb0_gate.pt -> round1_effnetb0_calibrator.pkl
-    """
     gate_path = Path(gate_model_path)
     stem = gate_path.stem
 
     if stem.endswith("_gate"):
-        cal_name = stem[:-5] + "_calibrator.pkl"
+        calibrator_name = stem[:-5] + "_calibrator.pkl"
     else:
-        cal_name = stem + "_calibrator.pkl"
+        calibrator_name = stem + "_calibrator.pkl"
 
-    cal_path = gate_path.with_name(cal_name)
-    if cal_path.exists():
-        return str(cal_path)
-    return None
+    calibrator_path = gate_path.with_name(calibrator_name)
+    return str(calibrator_path) if calibrator_path.exists() else None
+
+
+def load_gate_calibrator(calibrator_path: Optional[str]) -> Optional[Any]:
+    if not calibrator_path:
+        return None
+
+    try:
+        with open(calibrator_path, "rb") as handle:
+            obj = pickle.load(handle)
+        calibrator = obj.get("calibrator", obj)
+        logger.info("Loaded gate calibrator from %s", calibrator_path)
+        return calibrator
+    except Exception as exc:
+        logger.warning("Failed to load gate calibrator from %s: %s", calibrator_path, exc)
+        return None
 
 
 @torch.no_grad()
-def gate_predict(
-    bundle: Dict[str, Any],
-    image_tensor: torch.Tensor,
-    calibrator: Optional[Any] = None,
-) -> float:
-    """Return calibrated p_gate(anomaly) if calibrator exists."""
+def gate_predict(bundle: Dict[str, Any], image_tensor: torch.Tensor, calibrator: Optional[Any] = None) -> float:
     model = bundle["model"]
-
     if image_tensor.dim() == 3:
         image_tensor = image_tensor.unsqueeze(0)
 
-    model_device = next(model.parameters()).device
-    image_tensor = image_tensor.to(model_device)
-
-    logits = model(image_tensor).squeeze(-1)
-    prob = torch.sigmoid(logits).item()
+    logits = model(image_tensor.to(next(model.parameters()).device)).squeeze(-1)
+    probability = float(torch.sigmoid(logits).item())
 
     if calibrator is not None:
-        prob_arr = np.array([prob], dtype=np.float32)
-
-        # custom PlattCalibrator / IsotonicCalibrator 둘 다 predict_proba 제공
+        probs = np.array([probability], dtype=np.float32)
         if hasattr(calibrator, "predict_proba"):
-            out = calibrator.predict_proba(prob_arr)
-            out = np.asarray(out)
-
-            # sklearn logistic 계열이면 (N, 2)
-            if out.ndim == 2:
-                prob = float(out[0, 1])
-            else:
-                prob = float(out[0])
-
-        # 혹시 직접 sklearn isotonic object가 들어온 경우
+            calibrated = np.asarray(calibrator.predict_proba(probs))
+            probability = float(calibrated[0, 1] if calibrated.ndim == 2 else calibrated[0])
         elif hasattr(calibrator, "predict"):
-            prob = float(calibrator.predict(prob_arr)[0])
+            probability = float(np.asarray(calibrator.predict(probs))[0])
 
-        prob = float(np.clip(prob, 0.0, 1.0))
-
-    return prob
+    return float(np.clip(probability, 0.0, 1.0))
 
 
-# ---------------------------------------------------------------------------
-# Heatmap inference contract
-# ---------------------------------------------------------------------------
-def heatmap_predict(model: PatchCoreModel, image_tensor: torch.Tensor):
-    """
-    PatchCoreModel.predict() 결과(dict)를 그대로 반환.
-    기대 key:
-      - anomaly_score
-      - raw_score_heatmap
-      - normalized_score_heatmap
-      - heatmap_overlay
-    """
+def heatmap_predict(model: PatchCoreModel, image_tensor: torch.Tensor) -> Dict[str, Any]:
     return model.predict(image_tensor)
 
 
-# ---------------------------------------------------------------------------
-# Runtime metrics accumulator
-# ---------------------------------------------------------------------------
 class _Metrics:
     def __init__(self) -> None:
-        self.total_predictions: int = 0
-        self.heatmap_calls: int = 0
-        self.gate_latency_sum_ms: float = 0.0
-        self.heatmap_latency_sum_ms: float = 0.0
-        self.total_latency_sum_ms: float = 0.0
+        self.total_predictions = 0
+        self.heatmap_calls = 0
+        self.gate_latency_sum_ms = 0.0
+        self.heatmap_latency_sum_ms = 0.0
+        self.total_latency_sum_ms = 0.0
 
     def record(
         self,
+        *,
         called_heatmap: bool,
         gate_latency_ms: float,
         heatmap_latency_ms: float,
@@ -335,90 +345,408 @@ class _Metrics:
         self.heatmap_latency_sum_ms += heatmap_latency_ms
         self.total_latency_sum_ms += total_latency_ms
 
-    @property
-    def heatmap_call_rate(self) -> float:
-        if self.total_predictions == 0:
-            return 0.0
-        return self.heatmap_calls / self.total_predictions
-
-    @property
-    def avg_gate_latency_ms(self) -> float:
-        if self.total_predictions == 0:
-            return 0.0
-        return self.gate_latency_sum_ms / self.total_predictions
-
-    @property
-    def avg_heatmap_latency_ms(self) -> float:
-        if self.heatmap_calls == 0:
-            return 0.0
-        return self.heatmap_latency_sum_ms / self.heatmap_calls
-
-    @property
-    def avg_total_latency_ms(self) -> float:
-        if self.total_predictions == 0:
-            return 0.0
-        return self.total_latency_sum_ms / self.total_predictions
-
     def snapshot(self) -> Dict[str, Any]:
+        total = max(self.total_predictions, 1)
+        heatmap_total = max(self.heatmap_calls, 1)
         return {
             "total_predictions": self.total_predictions,
             "heatmap_calls": self.heatmap_calls,
-            "heatmap_call_rate": round(self.heatmap_call_rate, 4),
-            "avg_gate_latency_ms": round(self.avg_gate_latency_ms, 2),
-            "avg_heatmap_latency_ms": round(self.avg_heatmap_latency_ms, 2),
-            "avg_total_latency_ms": round(self.avg_total_latency_ms, 2),
+            "heatmap_call_rate": round(self.heatmap_calls / total, 4),
+            "avg_gate_latency_ms": round(self.gate_latency_sum_ms / total, 2),
+            "avg_heatmap_latency_ms": round(self.heatmap_latency_sum_ms / heatmap_total, 2)
+            if self.heatmap_calls
+            else 0.0,
+            "avg_total_latency_ms": round(self.total_latency_sum_ms / total, 2),
         }
 
 
 metrics = _Metrics()
 
-# ---------------------------------------------------------------------------
-# Cascade decision logic
-# ---------------------------------------------------------------------------
-def _should_call_heatmap(p_gate: float) -> bool:
-    """
-    Override가 있으면 항상 heatmap.
-    p_gate <= T_LOW 이면 confident normal -> skip.
-    그 외에는 heatmap 호출.
-    """
-    if OVERRIDE_QUALITY_LOW or OVERRIDE_DRIFT_SUSPECTED or OVERRIDE_CRITICAL_LINE:
-        return True
 
-    if p_gate <= T_LOW:
+def _default_state() -> Dict[str, Any]:
+    now = _iso_now()
+    return {
+        "active_dataset_id": "DATA-V3-PRODUCTION",
+        "dataset_versions": [
+            {
+                "id": "DATA-V3-PRODUCTION",
+                "name": "Round 3 Pool",
+                "status": "locked",
+                "created_at": now,
+                "updated_at": now,
+                "source_dataset_id": None,
+                "sample_count": 14850,
+                "feedback_count": 0,
+                "samples": [],
+                "notes": "Current production baseline dataset.",
+            }
+        ],
+        "architectures": [
+            {
+                "id": "ARCH-GATE-EFF",
+                "name": "EfficientNet-B0 Gate",
+                "kind": "gate",
+                "source": "builtin",
+                "created_at": now,
+                "interface": {
+                    "input": "Tensor[B,3,224,224]",
+                    "output": "anomaly probability",
+                },
+                "file_url": None,
+            },
+            {
+                "id": "ARCH-HM-PC",
+                "name": "PatchCore ResNet18",
+                "kind": "heatmap",
+                "source": "builtin",
+                "created_at": now,
+                "interface": {
+                    "input": "Tensor[B,3,224,224]",
+                    "output": "anomaly_score + normalized heatmap + overlay",
+                },
+                "file_url": None,
+            },
+        ],
+        "training_runs": [],
+        "model_versions": [
+            {
+                "id": "MODEL-R3-FINAL",
+                "name": "Round 3 Production Cascade",
+                "status": "production",
+                "dataset_version_id": "DATA-V3-PRODUCTION",
+                "gate_architecture_id": "ARCH-GATE-EFF",
+                "heatmap_architecture_id": "ARCH-HM-PC",
+                "created_at": now,
+                "updated_at": now,
+                "metrics": {"f1": 0.94, "latency_ms": 53},
+                "lineage": "EfficientNet gate -> PatchCore heatmap",
+                "training_run_id": None,
+                "target_line": None,
+            }
+        ],
+        "feedback_items": [],
+        "logs": [
+            {
+                "id": f"LOG-{uuid.uuid4().hex[:10].upper()}",
+                "level": "info",
+                "time": now,
+                "message": "MLOps storage initialized.",
+            }
+        ],
+        "deployment": {
+            "production_model_id": "MODEL-R3-FINAL",
+            "staging_model_id": None,
+            "canary_model_id": None,
+            "canary_line": None,
+            "previous_production_model_id": None,
+            "last_action": "initialized",
+            "last_action_at": now,
+        },
+    }
+
+
+def _ensure(target: Dict[str, Any], key: str, default: Any) -> bool:
+    if key not in target:
+        target[key] = default
+        return True
+    return False
+
+
+def _sync_deployment(state: Dict[str, Any]) -> None:
+    deployment = state.setdefault("deployment", {})
+    deployment["production_model_id"] = next(
+        (model["id"] for model in state["model_versions"] if model.get("status") == "production"),
+        None,
+    )
+    deployment["staging_model_id"] = next(
+        (model["id"] for model in state["model_versions"] if model.get("status") == "staging"),
+        None,
+    )
+    deployment["canary_model_id"] = next(
+        (model["id"] for model in state["model_versions"] if model.get("status") == "canary"),
+        None,
+    )
+    if not deployment.get("canary_model_id"):
+        deployment["canary_line"] = None
+
+
+def _normalize_state(state: Dict[str, Any]) -> bool:
+    changed = False
+    defaults = _default_state()
+
+    for key in (
+        "active_dataset_id",
+        "dataset_versions",
+        "architectures",
+        "training_runs",
+        "model_versions",
+        "feedback_items",
+        "logs",
+        "deployment",
+    ):
+        changed |= _ensure(state, key, deepcopy(defaults[key]))
+
+    if not state["dataset_versions"]:
+        state["dataset_versions"] = deepcopy(defaults["dataset_versions"])
+        changed = True
+    if not state["architectures"]:
+        state["architectures"] = deepcopy(defaults["architectures"])
+        changed = True
+    if not state["model_versions"]:
+        state["model_versions"] = deepcopy(defaults["model_versions"])
+        changed = True
+
+    gate_arch_default = next(
+        (arch["id"] for arch in state["architectures"] if arch.get("kind") == "gate"),
+        defaults["architectures"][0]["id"],
+    )
+    heatmap_arch_default = next(
+        (arch["id"] for arch in state["architectures"] if arch.get("kind") == "heatmap"),
+        defaults["architectures"][1]["id"],
+    )
+
+    for dataset in state["dataset_versions"]:
+        changed |= _ensure(dataset, "name", dataset.get("id", "Dataset"))
+        changed |= _ensure(dataset, "status", "draft")
+        changed |= _ensure(dataset, "created_at", dataset.get("updated_at", _iso_now()))
+        changed |= _ensure(dataset, "updated_at", dataset["created_at"])
+        changed |= _ensure(dataset, "source_dataset_id", None)
+        changed |= _ensure(dataset, "sample_count", 0)
+        changed |= _ensure(dataset, "feedback_count", 0)
+        changed |= _ensure(dataset, "samples", [])
+        changed |= _ensure(dataset, "notes", "")
+
+    for arch in state["architectures"]:
+        changed |= _ensure(arch, "name", arch.get("id", "Architecture"))
+        changed |= _ensure(arch, "kind", "gate")
+        changed |= _ensure(arch, "source", "builtin")
+        changed |= _ensure(arch, "created_at", _iso_now())
+        changed |= _ensure(
+            arch,
+            "interface",
+            {
+                "input": "Tensor[B,3,224,224]",
+                "output": "model-specific output",
+            },
+        )
+        changed |= _ensure(arch, "file_url", None)
+
+    for run in state["training_runs"]:
+        changed |= _ensure(run, "status", "configured")
+        changed |= _ensure(run, "created_at", _iso_now())
+        changed |= _ensure(run, "dataset_version_id", state["active_dataset_id"])
+        changed |= _ensure(run, "gate_architecture_id", gate_arch_default)
+        changed |= _ensure(run, "heatmap_architecture_id", heatmap_arch_default)
+        changed |= _ensure(run, "train_strategy", "cascade")
+        changed |= _ensure(run, "notes", "")
+        changed |= _ensure(run, "lineage", "EfficientNet gate -> PatchCore heatmap")
+        changed |= _ensure(run, "sample_count", 0)
+
+    for model in state["model_versions"]:
+        changed |= _ensure(model, "name", model.get("id", "Model"))
+        changed |= _ensure(model, "status", "staging")
+        changed |= _ensure(model, "dataset_version_id", None)
+        changed |= _ensure(model, "gate_architecture_id", gate_arch_default)
+        changed |= _ensure(model, "heatmap_architecture_id", heatmap_arch_default)
+        changed |= _ensure(model, "created_at", _iso_now())
+        changed |= _ensure(model, "updated_at", model["created_at"])
+        changed |= _ensure(model, "metrics", {"f1": None, "latency_ms": None})
+        changed |= _ensure(model, "lineage", "EfficientNet gate -> PatchCore heatmap")
+        changed |= _ensure(model, "training_run_id", None)
+        changed |= _ensure(model, "target_line", None)
+
+    for item in state["feedback_items"]:
+        changed |= _ensure(item, "sample_id", "")
+        changed |= _ensure(item, "dataset_version_id", state["active_dataset_id"])
+        changed |= _ensure(item, "feedback_type", "needs_review")
+        changed |= _ensure(item, "label", "unlabeled")
+        changed |= _ensure(item, "operator", "")
+        changed |= _ensure(item, "comment", "")
+        changed |= _ensure(item, "line", "")
+        changed |= _ensure(item, "predicted_label", "")
+        changed |= _ensure(item, "image_url", "")
+        changed |= _ensure(item, "created_at", _iso_now())
+
+    for log in state["logs"]:
+        changed |= _ensure(log, "id", f"LOG-{uuid.uuid4().hex[:10].upper()}")
+        changed |= _ensure(log, "level", "info")
+        changed |= _ensure(log, "time", _iso_now())
+        changed |= _ensure(log, "message", "")
+
+    deployment = state["deployment"]
+    changed |= _ensure(deployment, "production_model_id", None)
+    changed |= _ensure(deployment, "staging_model_id", None)
+    changed |= _ensure(deployment, "canary_model_id", None)
+    changed |= _ensure(deployment, "canary_line", None)
+    changed |= _ensure(deployment, "previous_production_model_id", None)
+    changed |= _ensure(deployment, "last_action", "loaded")
+    changed |= _ensure(deployment, "last_action_at", _iso_now())
+
+    before = json.dumps(deployment, ensure_ascii=False, sort_keys=True)
+    _sync_deployment(state)
+    after = json.dumps(state["deployment"], ensure_ascii=False, sort_keys=True)
+    if before != after:
+        changed = True
+
+    return changed
+
+
+def _save_state(state: Dict[str, Any]) -> None:
+    _ensure_dir(MLOPS_ROOT)
+    with open(MLOPS_STATE_PATH, "w", encoding="utf-8") as handle:
+        json.dump(state, handle, ensure_ascii=False, indent=2)
+
+
+def _ensure_mlops_storage() -> None:
+    for subdir in (
+        MLOPS_ROOT,
+        MLOPS_ASSETS_ROOT / "feedback",
+        MLOPS_ASSETS_ROOT / "uploads",
+        MLOPS_ASSETS_ROOT / "architectures",
+    ):
+        _ensure_dir(subdir)
+
+    if not MLOPS_STATE_PATH.exists():
+        _save_state(_default_state())
+
+
+def _load_state() -> Dict[str, Any]:
+    _ensure_mlops_storage()
+    with open(MLOPS_STATE_PATH, "r", encoding="utf-8") as handle:
+        state = json.load(handle)
+
+    if _normalize_state(state):
+        _save_state(state)
+    return state
+
+
+def _append_log(state: Dict[str, Any], level: str, message: str) -> None:
+    state["logs"].insert(
+        0,
+        {
+            "id": f"LOG-{uuid.uuid4().hex[:10].upper()}",
+            "level": level,
+            "time": _iso_now(),
+            "message": message,
+        },
+    )
+    state["logs"] = state["logs"][:100]
+
+
+def _get_dataset(state: Dict[str, Any], dataset_id: str) -> Dict[str, Any]:
+    dataset = next((item for item in state["dataset_versions"] if item["id"] == dataset_id), None)
+    if dataset is None:
+        raise HTTPException(status_code=404, detail=f"Dataset version not found: {dataset_id}")
+    return dataset
+
+
+def _get_model(state: Dict[str, Any], model_version_id: str) -> Dict[str, Any]:
+    model = next((item for item in state["model_versions"] if item["id"] == model_version_id), None)
+    if model is None:
+        raise HTTPException(status_code=404, detail=f"Model version not found: {model_version_id}")
+    return model
+
+
+def _next_version_id(prefix: str, items: List[Dict[str, Any]]) -> str:
+    today = datetime.now(KST).strftime("%Y.%m.%d")
+    revision = sum(1 for item in items if str(item.get("id", "")).startswith(f"{prefix}-{today}")) + 1
+    return f"{prefix}-{today}-r{revision}"
+
+
+def _next_run_id(state: Dict[str, Any]) -> str:
+    return f"RUN-{datetime.now(KST).strftime('%Y%m%d')}-{len(state['training_runs']) + 1:02d}"
+
+
+def _copy_dataset_snapshot(state: Dict[str, Any], source_dataset_id: str) -> Dict[str, Any]:
+    source = _get_dataset(state, source_dataset_id)
+    snapshot = {
+        "id": _next_version_id("DATA", state["dataset_versions"]),
+        "name": f"Snapshot of {source['id']}",
+        "status": "locked",
+        "created_at": _iso_now(),
+        "updated_at": _iso_now(),
+        "source_dataset_id": source["id"],
+        "sample_count": source.get("sample_count", 0),
+        "feedback_count": source.get("feedback_count", 0),
+        "samples": list(source.get("samples", [])),
+        "notes": f"Training snapshot created from {source['id']}",
+    }
+    state["dataset_versions"].insert(0, snapshot)
+    return snapshot
+
+
+def _register_sample(
+    dataset: Dict[str, Any],
+    *,
+    file_url: str,
+    file_name: str,
+    label: str,
+    source_type: str,
+    feedback_type: Optional[str] = None,
+    comment: str = "",
+    line: str = "",
+    operator: str = "",
+    predicted_label: str = "",
+) -> Dict[str, Any]:
+    sample = {
+        "id": f"SAMPLE-{uuid.uuid4().hex[:12].upper()}",
+        "file_url": file_url,
+        "file_name": file_name,
+        "label": label,
+        "source_type": source_type,
+        "feedback_type": feedback_type,
+        "comment": comment,
+        "line": line,
+        "operator": operator,
+        "predicted_label": predicted_label,
+        "created_at": _iso_now(),
+    }
+    dataset["samples"].insert(0, sample)
+    dataset["sample_count"] = int(dataset.get("sample_count", 0)) + 1
+    if feedback_type:
+        dataset["feedback_count"] = int(dataset.get("feedback_count", 0)) + 1
+    dataset["updated_at"] = _iso_now()
+    return sample
+
+
+def _should_call_heatmap(probability: float) -> bool:
+    if probability <= T_LOW:
         return False
-
-    if p_gate >= T_HIGH:
-        return True
-
-    # uncertain zone
     return True
 
 
-def _cascade_decision(p_gate: float, heatmap_score: Optional[float]) -> str:
-    """
-    Returns:
-        "normal"
-        "anomaly"
-        "normal (heatmap)"
-    """
+def _cascade_decision(probability: float, heatmap_score: Optional[float]) -> str:
     if heatmap_score is None:
-        return "normal"
-
-    HEATMAP_THRESHOLD = 0.5
-    if heatmap_score >= HEATMAP_THRESHOLD:
-        return "anomaly"
-    return "normal (heatmap)"
+        return "anomaly" if probability >= T_HIGH else "normal"
+    return "anomaly" if heatmap_score >= 0.5 else "normal (heatmap)"
 
 
-# ---------------------------------------------------------------------------
-# FastAPI app
-# ---------------------------------------------------------------------------
+class TrainRunRequest(BaseModel):
+    dataset_version_id: Optional[str] = None
+    gate_architecture_id: str
+    heatmap_architecture_id: str
+    train_strategy: str = "cascade"
+    notes: str = ""
+
+
+class PromoteModelRequest(BaseModel):
+    model_version_id: str
+    target_status: Literal["staging", "production"] = "production"
+
+
+class CanaryRequest(BaseModel):
+    model_version_id: str
+    line: str = "LINE-B"
+
+
+class RollbackRequest(BaseModel):
+    model_version_id: Optional[str] = None
+
+
 app = FastAPI(
-    title="Cascade Anomaly Detection Service",
-    description="Gate -> Heatmap cascade serving endpoint",
+    title="SteelVision Final Server",
     version="2.0.0",
 )
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -426,6 +754,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.mount("/mlops-assets", StaticFiles(directory=str(MLOPS_ASSETS_ROOT)), name="mlops-assets")
 
 _gate_bundle: Optional[Dict[str, Any]] = None
 _gate_calibrator: Optional[Any] = None
@@ -433,265 +762,40 @@ _heatmap_model: Optional[PatchCoreModel] = None
 
 
 @app.on_event("startup")
-async def _load_models() -> None:
-    global _gate_bundle, _gate_calibrator, _heatmap_model
-    global T_LOW, T_HIGH, INPUT_SIZE, _preprocess
+async def startup() -> None:
+    global _gate_bundle, _gate_calibrator, _heatmap_model, INPUT_SIZE, T_LOW, T_HIGH, _preprocess
 
-    logger.info("Loading gate model from %s", GATE_MODEL_PATH)
-    _gate_bundle = load_gate_checkpoint(GATE_MODEL_PATH, DEVICE)
-
-    # checkpoint에 저장된 input size 반영
-    INPUT_SIZE = int(_gate_bundle["input_size"])
-    _preprocess = build_preprocess(INPUT_SIZE)
-
-    cal_path = find_calibrator_path(GATE_MODEL_PATH)
-    _gate_calibrator = load_gate_calibrator(cal_path)
-
-    # checkpoint에서 추천 threshold 반영
-    T_LOW = float(_gate_bundle["T_low"])
-    T_HIGH = float(_gate_bundle["T_high"])
-
-    logger.info(
-        "Gate loaded: gate_name=%s, backbone=%s, input_size=%d, T_low=%.3f, T_high=%.3f",
-        _gate_bundle["gate_name"],
-        _gate_bundle["backbone"],
-        INPUT_SIZE,
-        T_LOW,
-        T_HIGH,
-    )
-
-    logger.info("Loading heatmap model from %s", HEATMAP_MODEL_PATH)
-    _heatmap_model = PatchCoreModel.load(str(HEATMAP_MODEL_PATH), device=str(DEVICE))
-    logger.info("Heatmap model loaded on %s", DEVICE)
-
-    logger.info(
-        "Cascade config  T_low=%.3f  T_high=%.3f  overrides=[quality_low=%s, drift_suspected=%s, critical_line=%s]",
-        T_LOW,
-        T_HIGH,
-        OVERRIDE_QUALITY_LOW,
-        OVERRIDE_DRIFT_SUSPECTED,
-        OVERRIDE_CRITICAL_LINE,
-    )
-
-
-# --------------------------------------------------------------------------
-# POST /predict
-# --------------------------------------------------------------------------
-@app.post("/predict")
-async def predict(file: UploadFile = File(...)):
-    """
-    Response schema:
-    {
-        "gate_score": float,
-        "decision": str,
-        "heatmap_called": bool,
-        "heatmap_score": float|null,
-        "heatmap_data": list|null,
-        "override_active": bool,
-        "thresholds": {
-            "T_low": float,
-            "T_high": float
-        },
-        "mlflow_info": {
-            "gate_name": str,
-            "backbone": str,
-            "input_size": int
-        },
-        "latency": {
-            "gate_latency_ms": float,
-            "heatmap_latency_ms": float,
-            "total_latency_ms": float
-        }
-    }
-    """
-    t_start = time.perf_counter()
-
-    # --- read & preprocess ------------------------------------------------
-    try:
-        image_bytes = await file.read()
-        tensor = preprocess_image(image_bytes)
-    except Exception as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Failed to read/preprocess image: {exc}",
-        )
-
-    # --- gate inference ---------------------------------------------------
-    t_gate_start = time.perf_counter()
-    try:
-        if _gate_bundle is None:
-            raise RuntimeError("Gate model is not loaded")
-        p_gate = gate_predict(_gate_bundle, tensor, _gate_calibrator)
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Gate model inference failed: {exc}",
-        )
-    t_gate_end = time.perf_counter()
-    gate_latency_ms = (t_gate_end - t_gate_start) * 1000.0
-
-    # --- cascade decision -------------------------------------------------
-    override_active = (
-        OVERRIDE_QUALITY_LOW
-        or OVERRIDE_DRIFT_SUSPECTED
-        or OVERRIDE_CRITICAL_LINE
-    )
-    call_heatmap = _should_call_heatmap(p_gate)
-
-    heatmap_score: Optional[float] = None
-    heatmap_latency_ms: float = 0.0
-    heatmap_data_for_ui: Optional[list] = None
-
-    if call_heatmap:
-        t_hm_start = time.perf_counter()
-        try:
-            if _heatmap_model is None:
-                raise RuntimeError("Heatmap model is not loaded")
-
-            hm_result = heatmap_predict(_heatmap_model, tensor)
-
-            if isinstance(hm_result, dict):
-                # 1) anomaly score
-                heatmap_score = float(
-                    hm_result.get("anomaly_score", hm_result.get("score", 0.0))
-                )
-
-                # 2) UI용 overlay 우선
-                overlay = hm_result.get("heatmap_overlay", None)
-                if overlay is not None:
-                    if torch.is_tensor(overlay):
-                        heatmap_data_for_ui = overlay.detach().cpu().numpy().tolist()
-                    elif isinstance(overlay, np.ndarray):
-                        heatmap_data_for_ui = overlay.tolist()
-                    else:
-                        try:
-                            heatmap_data_for_ui = list(overlay)
-                        except Exception:
-                            heatmap_data_for_ui = None
-
-                # 3) overlay 없으면 normalized heatmap fallback
-                if heatmap_data_for_ui is None:
-                    norm_map = hm_result.get("normalized_score_heatmap", None)
-                    if norm_map is not None:
-                        if torch.is_tensor(norm_map):
-                            heatmap_data_for_ui = norm_map.detach().cpu().numpy().tolist()
-                        elif isinstance(norm_map, np.ndarray):
-                            heatmap_data_for_ui = norm_map.tolist()
-
-                # 4) raw heatmap fallback
-                if heatmap_data_for_ui is None:
-                    raw_map = hm_result.get("raw_score_heatmap", None)
-                    if raw_map is not None:
-                        if torch.is_tensor(raw_map):
-                            heatmap_data_for_ui = raw_map.detach().cpu().numpy().tolist()
-                        elif isinstance(raw_map, np.ndarray):
-                            heatmap_data_for_ui = raw_map.tolist()
-
-            else:
-                # 혹시 float만 반환하는 구현이라면
-                heatmap_score = float(hm_result)
-
-        except Exception as exc:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Heatmap model inference failed: {exc}",
-            )
-        t_hm_end = time.perf_counter()
-        heatmap_latency_ms = (t_hm_end - t_hm_start) * 1000.0
-
-    # --- final decision ---------------------------------------------------
-    decision = _cascade_decision(p_gate, heatmap_score)
-
-    t_end = time.perf_counter()
-    total_latency_ms = (t_end - t_start) * 1000.0
-
-    # --- metrics ----------------------------------------------------------
-    metrics.record(
-        called_heatmap=call_heatmap,
-        gate_latency_ms=gate_latency_ms,
-        heatmap_latency_ms=heatmap_latency_ms,
-        total_latency_ms=total_latency_ms,
-    )
-
-    # --- log --------------------------------------------------------------
-    logger.info(
-        "predict  gate=%.6f  T_low=%.3f  T_high=%.3f  heatmap_called=%s  heatmap=%s  decision=%s  gate_ms=%.2f  hm_ms=%.2f  total_ms=%.2f",
-        p_gate,
-        T_LOW,
-        T_HIGH,
-        call_heatmap,
-        f"{heatmap_score:.6f}" if heatmap_score is not None else "N/A",
-        decision,
-        gate_latency_ms,
-        heatmap_latency_ms,
-        total_latency_ms,
-    )
-
-    return JSONResponse(
-        content={
-            "gate_score": round(float(p_gate), 6),
-            "decision": decision,
-            "heatmap_called": call_heatmap,
-            "heatmap_score": (
-                round(float(heatmap_score), 6)
-                if heatmap_score is not None else None
-            ),
-            "heatmap_data": heatmap_data_for_ui,
-            "override_active": override_active,
-            "thresholds": {
-                "T_low": round(float(T_LOW), 6),
-                "T_high": round(float(T_HIGH), 6),
-            },
-            "mlflow_info": {
-                "gate_name": _gate_bundle["gate_name"] if _gate_bundle else None,
-                "backbone": _gate_bundle["backbone"] if _gate_bundle else None,
-                "input_size": _gate_bundle["input_size"] if _gate_bundle else None,
-            },
-            "latency": {
-                "gate_latency_ms": round(gate_latency_ms, 2),
-                "heatmap_latency_ms": round(heatmap_latency_ms, 2),
-                "total_latency_ms": round(total_latency_ms, 2),
-            },
-        }
-    )
-
-
-# --------------------------------------------------------------------------
-# POST /predict_gate_only
-#   Gate score 분포 디버깅용
-# --------------------------------------------------------------------------
-@app.post("/predict_gate_only")
-async def predict_gate_only(file: UploadFile = File(...)):
-    try:
-        image_bytes = await file.read()
-        tensor = preprocess_image(image_bytes)
-    except Exception as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Failed to read/preprocess image: {exc}",
-        )
+    _load_state()
 
     try:
-        if _gate_bundle is None:
-            raise RuntimeError("Gate model is not loaded")
-        p_gate = gate_predict(_gate_bundle, tensor, _gate_calibrator)
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Gate model inference failed: {exc}",
+        _gate_bundle = load_gate_checkpoint(GATE_MODEL_PATH, DEVICE)
+        INPUT_SIZE = int(_gate_bundle["input_size"])
+        T_LOW = float(_gate_bundle["T_low"])
+        T_HIGH = float(_gate_bundle["T_high"])
+        _preprocess = build_preprocess(INPUT_SIZE)
+        _gate_calibrator = load_gate_calibrator(find_calibrator_path(GATE_MODEL_PATH))
+        logger.info(
+            "Gate loaded: gate_name=%s, input_size=%d, T_low=%.3f, T_high=%.3f",
+            _gate_bundle["gate_name"],
+            INPUT_SIZE,
+            T_LOW,
+            T_HIGH,
         )
+    except Exception as exc:
+        _gate_bundle = None
+        logger.exception("Failed to load gate model: %s", exc)
 
-    return {
-        "gate_score": round(float(p_gate), 6),
-        "T_low": round(float(T_LOW), 6),
-        "T_high": round(float(T_HIGH), 6),
-        "would_call_heatmap": _should_call_heatmap(p_gate),
-    }
+    try:
+        if Path(HEATMAP_MODEL_PATH).exists():
+            _heatmap_model = PatchCoreModel.load(HEATMAP_MODEL_PATH, device=str(DEVICE))
+            logger.info("Heatmap model loaded from %s", HEATMAP_MODEL_PATH)
+        else:
+            logger.warning("Heatmap model file not found: %s", HEATMAP_MODEL_PATH)
+    except Exception as exc:
+        _heatmap_model = None
+        logger.exception("Failed to load heatmap model: %s", exc)
 
 
-# --------------------------------------------------------------------------
-# GET /health
-# --------------------------------------------------------------------------
 @app.get("/health")
 async def health():
     return {
@@ -703,41 +807,436 @@ async def health():
         "cascade_config": {
             "T_low": T_LOW,
             "T_high": T_HIGH,
-            "override_quality_low": OVERRIDE_QUALITY_LOW,
-            "override_drift_suspected": OVERRIDE_DRIFT_SUSPECTED,
-            "override_critical_line": OVERRIDE_CRITICAL_LINE,
-        },
-        "gate_info": {
-            "gate_name": _gate_bundle["gate_name"] if _gate_bundle else None,
-            "backbone": _gate_bundle["backbone"] if _gate_bundle else None,
-            "input_size": _gate_bundle["input_size"] if _gate_bundle else None,
-            "checkpoint_path": _gate_bundle["checkpoint_path"] if _gate_bundle else None,
         },
     }
 
 
-# --------------------------------------------------------------------------
-# GET /metrics
-# --------------------------------------------------------------------------
 @app.get("/metrics")
 async def get_metrics():
     return metrics.snapshot()
 
 
-# --------------------------------------------------------------------------
-# Entrypoint
-# --------------------------------------------------------------------------
+@app.post("/predict")
+async def predict(file: UploadFile = File(...)):
+    if _gate_bundle is None:
+        raise HTTPException(status_code=500, detail="Gate model is not loaded.")
+
+    started_at = time.perf_counter()
+
+    try:
+        image_bytes = await file.read()
+        tensor = preprocess_image(image_bytes)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Failed to read image: {exc}") from exc
+
+    gate_started_at = time.perf_counter()
+    try:
+        gate_score = gate_predict(_gate_bundle, tensor, _gate_calibrator)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Gate model inference failed: {exc}") from exc
+    gate_latency_ms = (time.perf_counter() - gate_started_at) * 1000.0
+
+    heatmap_called = False
+    heatmap_score: Optional[float] = None
+    heatmap_latency_ms = 0.0
+    overlay_b64: Optional[str] = None
+    heatmap_b64: Optional[str] = None
+
+    if _should_call_heatmap(gate_score) and _heatmap_model is not None:
+        heatmap_called = True
+        heatmap_started_at = time.perf_counter()
+        try:
+            hm_result = heatmap_predict(_heatmap_model, tensor)
+            heatmap_score = float(hm_result.get("anomaly_score", hm_result.get("score", 0.0)))
+
+            overlay = hm_result.get("heatmap_overlay")
+            if overlay is not None:
+                if torch.is_tensor(overlay):
+                    overlay = overlay.detach().cpu().numpy()
+                overlay_b64 = _np_to_base64_png(np.asarray(overlay))
+
+            norm_map = hm_result.get("normalized_score_heatmap")
+            if norm_map is not None:
+                if torch.is_tensor(norm_map):
+                    norm_map = norm_map.detach().cpu().numpy()
+                heatmap_b64 = _np_to_base64_png(np.asarray(norm_map))
+        except Exception as exc:
+            logger.exception("Heatmap inference failed: %s", exc)
+            heatmap_called = False
+            heatmap_score = None
+            overlay_b64 = None
+            heatmap_b64 = None
+        heatmap_latency_ms = (time.perf_counter() - heatmap_started_at) * 1000.0
+
+    decision = _cascade_decision(gate_score, heatmap_score)
+    total_latency_ms = (time.perf_counter() - started_at) * 1000.0
+
+    metrics.record(
+        called_heatmap=heatmap_called,
+        gate_latency_ms=gate_latency_ms,
+        heatmap_latency_ms=heatmap_latency_ms,
+        total_latency_ms=total_latency_ms,
+    )
+
+    logger.info(
+        "predict gate=%.4f heatmap_called=%s heatmap=%s decision=%s total_ms=%.2f",
+        gate_score,
+        heatmap_called,
+        f"{heatmap_score:.4f}" if heatmap_score is not None else "N/A",
+        decision,
+        total_latency_ms,
+    )
+
+    return {
+        "gate_score": round(float(gate_score), 6),
+        "decision": decision,
+        "heatmap_called": heatmap_called,
+        "heatmap_score": None if heatmap_score is None else round(float(heatmap_score), 6),
+        "override_active": False,
+        "latency": {
+            "gate_latency_ms": round(gate_latency_ms, 3),
+            "heatmap_latency_ms": round(heatmap_latency_ms, 3),
+            "total_latency_ms": round(total_latency_ms, 3),
+        },
+        "heatmap_overlay": overlay_b64,
+        "normalized_score_heatmap": heatmap_b64,
+        "cascade": {
+            "gate_architecture": _gate_bundle["gate_name"] if _gate_bundle else None,
+            "heatmap_architecture": "patchcore",
+            "t_low": round(float(T_LOW), 6),
+            "t_high": round(float(T_HIGH), 6),
+        },
+    }
+
+
+@app.get("/mlops/dashboard")
+async def mlops_dashboard():
+    state = _load_state()
+    return {
+        "active_dataset_id": state["active_dataset_id"],
+        "dataset_versions": state["dataset_versions"][:10],
+        "architectures": state["architectures"],
+        "training_runs": state["training_runs"][:10],
+        "model_versions": state["model_versions"][:10],
+        "feedback_items": state["feedback_items"][:12],
+        "logs": state["logs"][:20],
+        "deployment": state["deployment"],
+        "interfaces": {
+            "gate_input": f"Tensor[B,3,{INPUT_SIZE},{INPUT_SIZE}]",
+            "gate_output": "Anomaly probability",
+            "heatmap_input": f"Tensor[B,3,{INPUT_SIZE},{INPUT_SIZE}]",
+            "heatmap_output": "anomaly_score + normalized heatmap + overlay",
+            "cascade": "EfficientNet gate -> PatchCore heatmap",
+        },
+    }
+
+
+@app.post("/mlops/feedback")
+async def create_feedback(
+    file: UploadFile = File(...),
+    feedback_type: Literal["false_positive", "false_negative", "confirmed_anomaly", "needs_review"] = Form(...),
+    label: Literal["normal", "anomaly", "unlabeled"] = Form("unlabeled"),
+    operator: str = Form(""),
+    comment: str = Form(""),
+    line: str = Form(""),
+    predicted_label: str = Form(""),
+):
+    state = _load_state()
+    dataset = _get_dataset(state, state["active_dataset_id"])
+
+    extension = Path(file.filename or "sample.png").suffix or ".png"
+    target_dir = MLOPS_ASSETS_ROOT / "feedback" / datetime.now(KST).strftime("%Y%m%d")
+    _ensure_dir(target_dir)
+    target_path = target_dir / f"{uuid.uuid4().hex}{extension}"
+    with open(target_path, "wb") as handle:
+        shutil.copyfileobj(file.file, handle)
+
+    sample = _register_sample(
+        dataset,
+        file_url=_public_asset_url(target_path),
+        file_name=file.filename or target_path.name,
+        label=label,
+        source_type="operator_feedback",
+        feedback_type=feedback_type,
+        comment=comment,
+        line=line,
+        operator=operator,
+        predicted_label=predicted_label,
+    )
+
+    feedback_item = {
+        "id": f"FDBK-{uuid.uuid4().hex[:12].upper()}",
+        "sample_id": sample["id"],
+        "dataset_version_id": dataset["id"],
+        "feedback_type": feedback_type,
+        "label": label,
+        "operator": operator,
+        "comment": comment,
+        "line": line,
+        "predicted_label": predicted_label,
+        "image_url": sample["file_url"],
+        "created_at": _iso_now(),
+    }
+    state["feedback_items"].insert(0, feedback_item)
+    _append_log(state, "info", f"Operator feedback added to {dataset['id']} ({feedback_type}).")
+    _save_state(state)
+    return {
+        "message": "Feedback added to active dataset.",
+        "feedback_item": feedback_item,
+        "dataset_version": dataset,
+    }
+
+
+@app.post("/mlops/datasets/upload")
+async def upload_dataset_files(
+    files: List[UploadFile] = File(...),
+    label: Literal["normal", "anomaly", "unlabeled"] = Form("unlabeled"),
+    source_type: Literal["bulk_upload", "field_capture", "reviewed_set"] = Form("bulk_upload"),
+    line: str = Form(""),
+    comment: str = Form(""),
+):
+    if not files:
+        raise HTTPException(status_code=400, detail="No files were uploaded.")
+
+    state = _load_state()
+    dataset = _get_dataset(state, state["active_dataset_id"])
+    ingest_dir = MLOPS_ASSETS_ROOT / "uploads" / datetime.now(KST).strftime("%Y%m%d") / uuid.uuid4().hex[:8]
+    _ensure_dir(ingest_dir)
+
+    added_samples: List[Dict[str, Any]] = []
+    for upload in files:
+        extension = Path(upload.filename or "sample.png").suffix or ".png"
+        clean_name = Path(upload.filename or f"{uuid.uuid4().hex}{extension}").name
+        target_path = ingest_dir / clean_name
+        with open(target_path, "wb") as handle:
+            shutil.copyfileobj(upload.file, handle)
+
+        sample = _register_sample(
+            dataset,
+            file_url=_public_asset_url(target_path),
+            file_name=clean_name,
+            label=label,
+            source_type=source_type,
+            comment=comment,
+            line=line,
+        )
+        added_samples.append(sample)
+
+    _append_log(state, "info", f"{len(added_samples)} files ingested into {dataset['id']}.")
+    _save_state(state)
+    return {
+        "message": f"{len(added_samples)} files added to the active dataset.",
+        "dataset_version": dataset,
+        "added_samples": added_samples[:12],
+        "added_count": len(added_samples),
+    }
+
+
+@app.post("/mlops/architectures/upload")
+async def upload_architecture(
+    file: UploadFile = File(...),
+    kind: Literal["gate", "heatmap"] = Form(...),
+    name: str = Form(...),
+):
+    state = _load_state()
+    extension = Path(file.filename or "model.py").suffix or ".py"
+    architecture_dir = MLOPS_ASSETS_ROOT / "architectures" / kind
+    _ensure_dir(architecture_dir)
+    target_path = architecture_dir / f"{_slugify(name)}-{uuid.uuid4().hex[:8]}{extension}"
+    with open(target_path, "wb") as handle:
+        shutil.copyfileobj(file.file, handle)
+
+    architecture = {
+        "id": f"ARCH-{kind.upper()}-{uuid.uuid4().hex[:8].upper()}",
+        "name": name,
+        "kind": kind,
+        "source": "custom",
+        "created_at": _iso_now(),
+        "interface": {
+            "input": f"Tensor[B,3,{INPUT_SIZE},{INPUT_SIZE}]",
+            "output": "Gate: anomaly probability / Heatmap: anomaly_score + maps",
+        },
+        "file_url": _public_asset_url(target_path),
+    }
+    state["architectures"].insert(0, architecture)
+    _append_log(state, "info", f"Custom {kind} architecture registered: {name}.")
+    _save_state(state)
+    return {"message": "Architecture registered.", "architecture": architecture}
+
+
+@app.post("/mlops/train")
+async def create_training_run(payload: TrainRunRequest):
+    state = _load_state()
+    dataset_id = payload.dataset_version_id or state["active_dataset_id"]
+    snapshot = _copy_dataset_snapshot(state, dataset_id)
+    run_id = _next_run_id(state)
+    model_version_id = _next_version_id("MODEL", state["model_versions"])
+
+    run = {
+        "id": run_id,
+        "status": "configured",
+        "created_at": _iso_now(),
+        "dataset_version_id": snapshot["id"],
+        "gate_architecture_id": payload.gate_architecture_id,
+        "heatmap_architecture_id": payload.heatmap_architecture_id,
+        "train_strategy": payload.train_strategy,
+        "notes": payload.notes,
+        "lineage": "EfficientNet gate -> PatchCore heatmap",
+        "sample_count": snapshot["sample_count"],
+    }
+    state["training_runs"].insert(0, run)
+
+    model_version = {
+        "id": model_version_id,
+        "name": f"Cascade Candidate {model_version_id}",
+        "status": "staging",
+        "dataset_version_id": snapshot["id"],
+        "gate_architecture_id": payload.gate_architecture_id,
+        "heatmap_architecture_id": payload.heatmap_architecture_id,
+        "created_at": _iso_now(),
+        "updated_at": _iso_now(),
+        "metrics": {"f1": None, "latency_ms": None},
+        "lineage": "EfficientNet gate -> PatchCore heatmap",
+        "training_run_id": run_id,
+        "target_line": None,
+    }
+    state["model_versions"].insert(0, model_version)
+    state["deployment"]["last_action"] = "train_created"
+    state["deployment"]["last_action_at"] = _iso_now()
+    _sync_deployment(state)
+    _append_log(state, "info", f"Training run {run_id} created from dataset snapshot {snapshot['id']}.")
+    _save_state(state)
+
+    return {
+        "message": "Training run configured. Dataset snapshot and staging model version were created.",
+        "training_run": run,
+        "dataset_snapshot": snapshot,
+        "model_version": model_version,
+    }
+
+
+@app.post("/mlops/deployments/canary")
+async def start_canary(payload: CanaryRequest):
+    state = _load_state()
+    target = _get_model(state, payload.model_version_id)
+
+    if target["status"] == "production":
+        raise HTTPException(status_code=400, detail="Production model cannot be re-used as a canary candidate.")
+
+    for model in state["model_versions"]:
+        if model["id"] != target["id"] and model.get("status") == "canary":
+            model["status"] = "staging"
+            model["updated_at"] = _iso_now()
+
+    target["status"] = "canary"
+    target["target_line"] = payload.line
+    target["updated_at"] = _iso_now()
+    state["deployment"]["canary_line"] = payload.line
+    state["deployment"]["last_action"] = "canary_started"
+    state["deployment"]["last_action_at"] = _iso_now()
+    _sync_deployment(state)
+    _append_log(state, "info", f"Canary started: {target['id']} on {payload.line}.")
+    _save_state(state)
+
+    return {
+        "message": f"Canary started on {payload.line}.",
+        "model_version": target,
+        "deployment": state["deployment"],
+    }
+
+
+@app.post("/mlops/models/promote")
+async def promote_model(payload: PromoteModelRequest):
+    state = _load_state()
+    target = _get_model(state, payload.model_version_id)
+
+    if payload.target_status == "production":
+        current_production = next(
+            (model for model in state["model_versions"] if model.get("status") == "production"),
+            None,
+        )
+        if current_production and current_production["id"] != target["id"]:
+            current_production["status"] = "archived"
+            current_production["updated_at"] = _iso_now()
+            state["deployment"]["previous_production_model_id"] = current_production["id"]
+
+        for model in state["model_versions"]:
+            if model["id"] != target["id"] and model.get("status") == "canary":
+                model["status"] = "staging"
+                model["target_line"] = None
+                model["updated_at"] = _iso_now()
+
+        target["status"] = "production"
+        target["target_line"] = None
+    else:
+        target["status"] = "staging"
+
+    target["updated_at"] = _iso_now()
+    state["deployment"]["last_action"] = f"promoted_{payload.target_status}"
+    state["deployment"]["last_action_at"] = _iso_now()
+    _sync_deployment(state)
+    _append_log(state, "info", f"Model {target['id']} promoted to {payload.target_status}.")
+    _save_state(state)
+    return {
+        "message": "Model version updated.",
+        "model_version": target,
+        "deployment": state["deployment"],
+    }
+
+
+@app.post("/mlops/deployments/rollback")
+async def rollback_deployment(payload: RollbackRequest):
+    state = _load_state()
+    deployment = state["deployment"]
+
+    target_id = payload.model_version_id or deployment.get("previous_production_model_id")
+    if not target_id:
+        archived = next((model for model in state["model_versions"] if model.get("status") == "archived"), None)
+        if archived is not None:
+            target_id = archived["id"]
+
+    if not target_id:
+        raise HTTPException(status_code=400, detail="No rollback candidate is available.")
+
+    target = _get_model(state, target_id)
+    current_production = next(
+        (model for model in state["model_versions"] if model.get("status") == "production"),
+        None,
+    )
+
+    if current_production and current_production["id"] != target["id"]:
+        current_production["status"] = "archived"
+        current_production["updated_at"] = _iso_now()
+
+    for model in state["model_versions"]:
+        if model.get("status") == "canary":
+            model["status"] = "staging"
+            model["target_line"] = None
+            model["updated_at"] = _iso_now()
+
+    target["status"] = "production"
+    target["target_line"] = None
+    target["updated_at"] = _iso_now()
+    deployment["last_action"] = "rolled_back"
+    deployment["last_action_at"] = _iso_now()
+    _sync_deployment(state)
+    _append_log(state, "warning", f"Rollback completed. Production restored to {target['id']}.")
+    _save_state(state)
+
+    return {
+        "message": f"Rollback completed to {target['id']}.",
+        "model_version": target,
+        "deployment": state["deployment"],
+    }
+
+
 if __name__ == "__main__":
     import uvicorn
 
-    host = _env_str("SERVE_HOST", "0.0.0.0")
-    port = int(_env_float("SERVE_PORT", 8000))
-    logger.info("Starting server on %s:%d", host, port)
-
     uvicorn.run(
         "src.serve:app",
-        host=host,
-        port=port,
+        host=_env_str("SERVE_HOST", "0.0.0.0"),
+        port=int(_env_float("SERVE_PORT", 8000)),
         reload=False,
         log_level="info",
     )

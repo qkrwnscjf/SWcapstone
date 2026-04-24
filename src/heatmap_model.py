@@ -504,7 +504,7 @@ class PatchCoreModel:
 
     @staticmethod
     def _make_overlay(
-        normalized_map: np.ndarray, alpha: float = 0.6
+        normalized_map: np.ndarray, alpha: float = 0.35
     ) -> np.ndarray:
         """Create an RGBA overlay image from a normalised heatmap.
 

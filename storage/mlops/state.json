@@ -25,6 +25,54 @@
   "feedback_items": [],
   "logs": [
     {
+      "id": "D6828120",
+      "time": "2026-04-24T08:01:05",
+      "level": "warning",
+      "message": "Data Removed: FDBK-849CF361"
+    },
+    {
+      "id": "2EB3F8AB",
+      "time": "2026-04-24T08:01:03",
+      "level": "warning",
+      "message": "Data Removed: FDBK-2FBC29B4"
+    },
+    {
+      "id": "91E5C21D",
+      "time": "2026-04-24T08:01:01",
+      "level": "warning",
+      "message": "Data Removed: FDBK-6A00CD7F"
+    },
+    {
+      "id": "4CD95D3B",
+      "time": "2026-04-24T08:00:50",
+      "level": "info",
+      "message": "Data Ingested: confirmed_anomaly (Actual: anomaly)"
+    },
+    {
+      "id": "914FE251",
+      "time": "2026-04-24T08:00:49",
+      "level": "info",
+      "message": "Data Ingested: false_negative (Actual: anomaly)"
+    },
+    {
+      "id": "BFF9C757",
+      "time": "2026-04-24T08:00:47",
+      "level": "info",
+      "message": "Data Ingested: false_positive (Actual: normal)"
+    },
+    {
+      "id": "76BA597B",
+      "time": "2026-04-24T07:39:45",
+      "level": "warning",
+      "message": "Data Removed: FDBK-A3145171"
+    },
+    {
+      "id": "EECD7BD4",
+      "time": "2026-04-24T07:39:40",
+      "level": "info",
+      "message": "Data Ingested: false_positive (Actual: normal)"
+    },
+    {
       "id": "22CE1F85",
       "time": "2026-04-15T04:52:17",
       "level": "warning",

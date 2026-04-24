@@ -35,6 +35,8 @@ export function uploadFeedback(payload: {
   comment: string;
   line: string;
   predictedLabel: string;
+  gateScore?: number;
+  heatmapScore?: number;
 }) {
   const form = new FormData();
   form.append("file", payload.file);
@@ -44,7 +46,13 @@ export function uploadFeedback(payload: {
   form.append("comment", payload.comment);
   form.append("line", payload.line);
   form.append("predicted_label", payload.predictedLabel);
+  form.append("gate_score", String(payload.gateScore ?? 0));
+  form.append("heatmap_score", String(payload.heatmapScore ?? 0));
   return request("/mlops/feedback", { method: "POST", body: form });
+}
+
+export function deleteFeedback(feedbackId: string) {
+  return request(`/mlops/feedback/${feedbackId}`, { method: "DELETE" });
 }
 
 export function uploadDatasetFiles(payload: {
@@ -56,22 +64,14 @@ export function uploadDatasetFiles(payload: {
 }) {
   const form = new FormData();
   payload.files.forEach((file) =>
-    form.append(
-      "files",
-      file,
-      (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name
-    )
+    form.append("files", file, file.name)
   );
-  form.append("label", payload.label);
-  form.append("source_type", payload.sourceType);
-  form.append("line", payload.line);
-  form.append("comment", payload.comment);
   return request("/mlops/datasets/upload", { method: "POST", body: form });
 }
 
 export function uploadArchitecture(payload: {
   file: File;
-  kind: "gate" | "heatmap";
+  kind: string;
   name: string;
 }) {
   const form = new FormData();
@@ -82,32 +82,54 @@ export function uploadArchitecture(payload: {
 }
 
 export function createTrainingRun(payload: {
-  datasetVersionId?: string;
-  gateArchitectureId: string;
-  heatmapArchitectureId: string;
-  trainStrategy: string;
-  notes: string;
+  architecture?: string;
+  epochs?: number;
+  batchSize?: number;
+  learningRate?: number;
+  optimizer?: string;
+  augmentation?: boolean;
 }) {
   return request("/mlops/train", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      dataset_version_id: payload.datasetVersionId || null,
-      gate_architecture_id: payload.gateArchitectureId,
-      heatmap_architecture_id: payload.heatmapArchitectureId,
-      train_strategy: payload.trainStrategy,
-      notes: payload.notes,
+      architecture: payload.architecture || "ARCH-GATE-EFF",
+      epochs: payload.epochs || 10,
+      batch_size: payload.batchSize || 32,
+      learning_rate: payload.learningRate || 0.001,
+      optimizer: payload.optimizer || "Adam",
+      augmentation: payload.augmentation !== undefined ? payload.augmentation : true,
     }),
   });
 }
 
-export function promoteModel(modelVersionId: string, targetStatus: "staging" | "production") {
-  return request<{ model_version: ModelVersion }>("/mlops/models/promote", {
+export function fetchTrainingStatus() {
+  return request("/mlops/training/status");
+}
+
+export function deployModel(payload: {
+  model_id: string;
+  gate_file?: string;
+  heatmap_file?: string;
+  ensemble_enabled: boolean;
+}) {
+  return request("/mlops/deploy", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model_version_id: modelVersionId,
-      target_status: targetStatus,
-    }),
+    body: JSON.stringify(payload),
   });
+}
+
+// promoteModel은 UI 호환성을 위해 유지하되 deployModel을 호출하도록 래핑
+export function promoteModel(modelVersionId: string, targetStatus: string, gateFile?: string, heatmapFile?: string) {
+  return deployModel({
+    model_id: modelVersionId,
+    gate_file: gateFile,
+    heatmap_file: heatmapFile,
+    ensemble_enabled: true
+  });
+}
+
+export function deleteTrainingRun(runId: string) {
+  return request(`/mlops/training/runs/${runId}`, { method: "DELETE" });
 }

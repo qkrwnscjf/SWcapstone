@@ -1,8 +1,6 @@
 services:
   backend:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    build: ./backend
     container_name: steelvision-backend
     ports:
       - "8000:8000"

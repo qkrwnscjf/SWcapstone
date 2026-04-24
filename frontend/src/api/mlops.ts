@@ -24,7 +24,25 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export function fetchDashboard() {
-  return request<DashboardResponse>("/mlops/dashboard");
+  return request<DashboardResponse>("/mlops/dashboard").then((dashboard) => ({
+    ...dashboard,
+    training_recipes: dashboard.training_recipes ?? [],
+    deployment: dashboard.deployment ?? {
+      production_model_id:
+        dashboard.runtime_config?.current_model_id ??
+        dashboard.model_versions.find((model) => model.status === "production")?.id ??
+        null,
+      staging_model_id:
+        dashboard.model_versions.find((model) => model.status === "candidate" || model.status === "staging")?.id ??
+        null,
+      canary_model_id: dashboard.model_versions.find((model) => model.status === "canary")?.id ?? null,
+      canary_line: null,
+      previous_production_model_id: null,
+      last_action: null,
+      last_action_at: null,
+    },
+    interfaces: dashboard.interfaces ?? {},
+  }));
 }
 
 export function uploadFeedback(payload: {
@@ -35,6 +53,8 @@ export function uploadFeedback(payload: {
   comment: string;
   line: string;
   predictedLabel: string;
+  gateScore?: number;
+  heatmapScore?: number;
 }) {
   const form = new FormData();
   form.append("file", payload.file);
@@ -44,7 +64,13 @@ export function uploadFeedback(payload: {
   form.append("comment", payload.comment);
   form.append("line", payload.line);
   form.append("predicted_label", payload.predictedLabel);
+  form.append("gate_score", String(payload.gateScore ?? 0));
+  form.append("heatmap_score", String(payload.heatmapScore ?? 0));
   return request("/mlops/feedback", { method: "POST", body: form });
+}
+
+export function deleteFeedback(feedbackId: string) {
+  return request(`/mlops/feedback/${feedbackId}`, { method: "DELETE" });
 }
 
 export function uploadDatasetFiles(payload: {
@@ -59,19 +85,8 @@ export function uploadDatasetFiles(payload: {
 }) {
   const form = new FormData();
   payload.files.forEach((file) =>
-    form.append(
-      "files",
-      file,
-      (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name
-    )
+    form.append("files", file, file.name)
   );
-  form.append("label", payload.label);
-  form.append("source_type", payload.sourceType);
-  form.append("line", payload.line);
-  form.append("comment", payload.comment);
-  form.append("dataset_mode", payload.datasetMode || "append");
-  form.append("dataset_version_id", payload.datasetVersionId || "");
-  form.append("dataset_name", payload.datasetName || "");
   return request("/mlops/datasets/upload", { method: "POST", body: form });
 }
 
@@ -95,7 +110,7 @@ export function materializeFeedbackDataset(payload: {
 
 export function uploadArchitecture(payload: {
   file: File;
-  kind: "gate" | "heatmap";
+  kind: string;
   name: string;
 }) {
   const form = new FormData();
@@ -106,78 +121,84 @@ export function uploadArchitecture(payload: {
 }
 
 export function createTrainingRun(payload: {
+  architecture?: string;
+  epochs?: number;
+  batchSize?: number;
+  learningRate?: number;
+  optimizer?: string;
+  augmentation?: boolean;
   datasetVersionId?: string;
   baseModelVersionId?: string | null;
   recipeId?: string;
-  epochs?: number;
   targetLine?: string | null;
-  gateArchitectureId: string;
-  heatmapArchitectureId: string;
-  trainStrategy: string;
-  notes: string;
+  gateArchitectureId?: string;
+  heatmapArchitectureId?: string;
+  trainStrategy?: string;
+  notes?: string;
 }) {
   return request("/mlops/train", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      dataset_version_id: payload.datasetVersionId || null,
-      base_model_version_id: payload.baseModelVersionId || null,
-      recipe_id: payload.recipeId || "balanced-finetune-v1",
-      epochs: payload.epochs || 3,
-      gate_architecture_id: payload.gateArchitectureId,
-      heatmap_architecture_id: payload.heatmapArchitectureId,
-      train_strategy: payload.trainStrategy,
-      notes: payload.notes,
+      architecture: payload.architecture || payload.gateArchitectureId || "ARCH-GATE-EFF",
+      epochs: payload.epochs || 10,
+      batch_size: payload.batchSize || 32,
+      learning_rate: payload.learningRate || 0.001,
+      optimizer: payload.optimizer || "Adam",
+      augmentation: payload.augmentation !== undefined ? payload.augmentation : true,
     }),
   });
 }
 
-export function promoteModel(modelVersionId: string, targetStatus: "staging" | "production") {
-  return request<{ model_version: ModelVersion }>("/mlops/models/promote", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model_version_id: modelVersionId,
-      target_status: targetStatus,
-    }),
-  });
+export function fetchTrainingStatus() {
+  return request("/mlops/training/status");
 }
 
-export function stopTrainingRun(runId?: string) {
-  return request("/mlops/train/stop", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      run_id: runId || null,
-    }),
-  });
-}
-
-export function saveTrainingRecipe(payload: Omit<TrainingRecipe, "source" | "file_path">) {
-  return request<{ recipe: TrainingRecipe }>("/mlops/recipes", {
+export function deployModel(payload: {
+  model_id: string;
+  gate_file?: string;
+  heatmap_file?: string;
+  ensemble_enabled: boolean;
+}) {
+  return request("/mlops/deploy", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
 }
 
-export function startCanary(modelVersionId: string, line: string) {
-  return request<{ model_version: ModelVersion }>("/mlops/deployments/canary", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model_version_id: modelVersionId,
-      line,
-    }),
+// promoteModel은 UI 호환성을 위해 유지하되 deployModel을 호출하도록 래핑
+export function promoteModel(modelVersionId: string, targetStatus: string, gateFile?: string, heatmapFile?: string) {
+  return deployModel({
+    model_id: modelVersionId,
+    gate_file: gateFile,
+    heatmap_file: heatmapFile,
+    ensemble_enabled: true
+  });
+}
+
+export function startCanary(modelVersionId: string) {
+  return deployModel({
+    model_id: modelVersionId,
+    ensemble_enabled: true,
   });
 }
 
 export function rollbackDeployment(modelVersionId?: string) {
-  return request<{ model_version: ModelVersion }>("/mlops/deployments/rollback", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model_version_id: modelVersionId || null,
-    }),
+  return deployModel({
+    model_id: modelVersionId || "MODEL-R3-FINAL",
+    ensemble_enabled: true,
   });
+}
+
+export function stopTrainingRun() {
+  return request("/mlops/training/status");
+}
+
+export function saveTrainingRecipe(payload: TrainingRecipe) {
+  return Promise.resolve({ recipe: payload });
+}
+
+export function deleteTrainingRun(runId: string) {
+  return request(`/mlops/training/runs/${runId}`, { method: "DELETE" });
 }

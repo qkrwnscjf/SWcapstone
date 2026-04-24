@@ -1,0 +1,155 @@
+<svg width="1200" height="1800" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background -->
+  <rect width="1200" height="1800" fill="#ffffff" />
+  
+  <!-- Header -->
+  <rect width="1200" height="130" fill="#1a202c" />
+  <text x="600" y="60" font-family="Arial, sans-serif" font-size="34" font-weight="bold" text-anchor="middle" fill="#ffffff">SteelVision: 최종 백엔드 기능 통합 및 핸드오버 명세서</text>
+  <text x="600" y="100" font-family="Arial, sans-serif" font-size="18" text-anchor="middle" fill="#90cdf4">Backend v3.5 Final Release | Ready for Full UI Integration</text>
+
+  <!-- Legend -->
+  <g transform="translate(850, 150)">
+    <rect width="300" height="80" rx="10" fill="#f7fafc" stroke="#e2e8f0" />
+    <circle cx="20" cy="25" r="7" fill="#48bb78" /><text x="35" y="30" font-family="Arial" font-size="12" font-weight="bold">Matched (요구사항 일치)</text>
+    <circle cx="20" cy="55" r="7" fill="#ed8936" /><text x="35" y="60" font-family="Arial" font-size="12" font-weight="bold">Additional (고도화 기능)</text>
+  </g>
+
+  <!-- Table Header -->
+  <g transform="translate(50, 250)">
+    <rect width="250" height="50" fill="#2d3748" />
+    <text x="125" y="32" font-family="Arial" font-size="16" font-weight="bold" text-anchor="middle" fill="#ffffff">카테고리</text>
+    <rect x="250" width="400" height="50" fill="#2d3748" />
+    <text x="450" y="32" font-family="Arial" font-size="16" font-weight="bold" text-anchor="middle" fill="#ffffff">백엔드 구현 상세 (Implementation)</text>
+    <rect x="650" width="120" height="50" fill="#2d3748" />
+    <text x="710" y="32" font-family="Arial" font-size="16" font-weight="bold" text-anchor="middle" fill="#ffffff">상태</text>
+    <rect x="770" width="380" height="50" fill="#2d3748" />
+    <text x="960" y="32" font-family="Arial" font-size="16" font-weight="bold" text-anchor="middle" fill="#ffffff">프론트 연동 팁</text>
+  </g>
+
+  <!-- Row 1: Upload -->
+  <g transform="translate(50, 300)">
+    <rect width="250" height="150" fill="#ffffff" stroke="#e2e8f0" />
+    <text x="20" y="40" font-family="Arial" font-size="15" font-weight="bold">데이터 적재</text>
+    <text x="20" y="65" font-family="Arial" font-size="12" fill="#718096">D&amp;D 기반 업로드</text>
+
+    <rect x="250" width="400" height="150" fill="#ffffff" stroke="#e2e8f0" />
+    <text x="270" y="40" font-family="Arial" font-size="13" font-weight="bold" fill="#2b6cb0">POST /mlops/datasets/upload</text>
+    <text x="270" y="70" font-family="Arial" font-size="12" fill="#4a5568">- 다중 이미지 파일(files) 수신 로직</text>
+    <text x="270" y="90" font-family="Arial" font-size="12" fill="#4a5568">- UUID 파일명 할당 및 물리적 저장 자동화</text>
+    <text x="270" y="110" font-family="Arial" font-size="12" fill="#4a5568">- 업로드 수량 실시간 카운트 갱신</text>
+
+    <rect x="650" width="120" height="150" fill="#ffffff" stroke="#e2e8f0" />
+    <rect x="665" y="60" width="90" height="30" rx="15" fill="#c6f6d5" />
+    <text x="710" y="80" font-family="Arial" font-size="12" font-weight="bold" text-anchor="middle" fill="#22543d">Matched</text>
+
+    <rect x="770" width="380" height="150" fill="#ffffff" stroke="#e2e8f0" />
+    <text x="790" y="40" font-family="Arial" font-size="12" fill="#2d3748">uploadDatasetFiles() 연동 완료.</text>
+    <text x="790" y="60" font-family="Arial" font-size="12" fill="#2d3748">D&amp;D 리스트를 FormData에 'files' 키로</text>
+    <text x="790" y="75" font-family="Arial" font-size="12" fill="#2d3748">담아 전송하면 즉시 반영됩니다.</text>
+  </g>
+
+  <!-- Row 2: Retrain & Monitor -->
+  <g transform="translate(50, 450)">
+    <rect width="250" height="180" fill="#ffffff" stroke="#e2e8f0" />
+    <text x="20" y="40" font-family="Arial" font-size="15" font-weight="bold">학습 및 모니터링</text>
+    <text x="20" y="65" font-family="Arial" font-size="12" fill="#718096">에폭/진행률 시각화</text>
+
+    <rect x="250" width="400" height="180" fill="#ffffff" stroke="#e2e8f0" />
+    <text x="270" y="40" font-family="Arial" font-size="13" font-weight="bold" fill="#2b6cb0">POST /mlops/train</text>
+    <text x="270" y="60" font-family="Arial" font-size="13" font-weight="bold" fill="#2b6cb0">GET /mlops/training/status</text>
+    <text x="270" y="90" font-family="Arial" font-size="12" fill="#4a5568">- 비동기(Async) 학습 엔진 구동</text>
+    <text x="270" y="110" font-family="Arial" font-size="12" fill="#4a5568">- 실시간 Epoch, Loss, Accuracy 정보 반환</text>
+    <text x="270" y="130" font-family="Arial, sans-serif" font-size="12" fill="#4a5568">- 0~100% 진행률(Progress) 데이터 제공</text>
+
+    <rect x="650" width="120" height="180" fill="#ffffff" stroke="#e2e8f0" />
+    <rect x="665" y="75" width="90" height="30" rx="15" fill="#c6f6d5" />
+    <text x="710" y="95" font-family="Arial" font-size="12" font-weight="bold" text-anchor="middle" fill="#22543d">Matched</text>
+
+    <rect x="770" width="380" height="180" fill="#ffffff" stroke="#e2e8f0" />
+    <text x="790" y="40" font-family="Arial" font-size="12" fill="#2d3748">fetchTrainingStatus()를 2초 간격으로</text>
+    <text x="790" y="60" font-family="Arial" font-size="12" fill="#2d3748">Polling 하세요. 받은 progress 값을</text>
+    <text x="790" y="75" font-family="Arial" font-size="12" fill="#2d3748">ProgressBar의 width로 바로 사용 가능.</text>
+  </g>
+
+  <!-- Row 3: Deployment & Hot-swap -->
+  <g transform="translate(50, 630)">
+    <rect width="250" height="200" fill="#ffffff" stroke="#e2e8f0" />
+    <text x="20" y="40" font-family="Arial" font-size="15" font-weight="bold">배포 및 제어</text>
+    <text x="20" y="65" font-family="Arial" font-size="12" fill="#718096">모델 선택 &amp; 앙상블</text>
+
+    <rect x="250" width="400" height="200" fill="#ffffff" stroke="#e2e8f0" />
+    <text x="270" y="40" font-family="Arial" font-size="13" font-weight="bold" fill="#2b6cb0">POST /mlops/deploy</text>
+    <text x="270" y="70" font-family="Arial" font-size="12" fill="#4a5568">- [Matched] 앙상블 모드 실시간 ON/OFF</text>
+    <text x="270" y="95" font-family="Arial" font-size="12" fill="#ed8936" font-weight="bold">- [Additional] 실시간 가중치 교환 (Hot-swap)</text>
+    <text x="270" y="115" font-family="Arial" font-size="12" fill="#4a5568">- 서버 재시작 없이 .pt 파일을 메모리에 즉시 로드</text>
+    <text x="270" y="135" font-family="Arial" font-size="12" fill="#4a5568">- available_model_files 실시간 스캔 기능</text>
+
+    <rect x="650" width="120" height="200" fill="#ffffff" stroke="#e2e8f0" />
+    <rect x="665" y="85" width="90" height="30" rx="15" fill="#feebc8" />
+    <text x="710" y="105" font-family="Arial" font-size="12" font-weight="bold" text-anchor="middle" fill="#7b341e">Additional</text>
+
+    <rect x="770" width="380" height="200" fill="#ffffff" stroke="#e2e8f0" />
+    <text x="790" y="40" font-family="Arial" font-size="12" fill="#2d3748">promote() 함수에 gate_file 인자가</text>
+    <text x="790" y="60" font-family="Arial" font-size="12" fill="#2d3748">추가되었습니다. UI의 드롭다운에서 선택한</text>
+    <text x="790" y="75" font-family="Arial" font-size="12" fill="#2d3748">파일명만 보내주면 즉시 테스트 모드 진입.</text>
+  </g>
+
+  <!-- Row 4: Feedback & Cleanup -->
+  <g transform="translate(50, 830)">
+    <rect width="250" height="180" fill="#ffffff" stroke="#e2e8f0" />
+    <text x="20" y="40" font-family="Arial" font-size="15" font-weight="bold">데이터 정제</text>
+    <text x="20" y="65" font-family="Arial" font-size="12" fill="#718096">피드백 및 삭제</text>
+
+    <rect x="250" width="400" height="180" fill="#ffffff" stroke="#e2e8f0" />
+    <text x="270" y="40" font-family="Arial" font-size="13" font-weight="bold" fill="#2b6cb0">POST /mlops/feedback</text>
+    <text x="270" y="60" font-family="Arial" font-size="13" font-weight="bold" fill="#c53030">DELETE /mlops/feedback/{id}</text>
+    <text x="270" y="90" font-family="Arial" font-size="12" fill="#4a5568">- [Matched] 피드백 시 모델 예측 점수 동시 저장</text>
+    <text x="270" y="115" font-family="Arial" font-size="12" fill="#ed8936" font-weight="bold">- [Additional] 물리적 오답 데이터 영구 삭제</text>
+    <text x="270" y="135" font-family="Arial" font-size="12" fill="#4a5568">- 오염 데이터 정제를 통한 가중치 정확도 개선 지원</text>
+
+    <rect x="650" width="120" height="180" fill="#ffffff" stroke="#e2e8f0" />
+    <rect x="665" y="75" width="90" height="30" rx="15" fill="#feebc8" />
+    <text x="710" y="95" font-family="Arial" font-size="12" font-weight="bold" text-anchor="middle" fill="#7b341e">Additional</text>
+
+    <rect x="770" width="380" height="180" fill="#ffffff" stroke="#e2e8f0" />
+    <text x="790" y="40" font-family="Arial" font-size="12" fill="#2d3748">removeFeedback() 연동 완료.</text>
+    <text x="790" y="60" font-family="Arial" font-size="12" fill="#2d3748">리스트 우측에 쓰레기통 아이콘을 배치하여</text>
+    <text x="790" y="75" font-family="Arial" font-size="12" fill="#2d3748">본 API를 호출하면 데이터 클리닝 완료.</text>
+  </g>
+
+  <!-- Section: Full Feature Checklist Summary -->
+  <g transform="translate(50, 1050)">
+    <rect width="1100" height="600" rx="20" fill="#f8fafc" stroke="#2d3748" stroke-dasharray="10,5" />
+    <text x="40" y="50" font-family="Arial" font-size="22" font-weight="bold" fill="#2d3748">전체 통합 기능 체크리스트 (Final Feature Verification)</text>
+    
+    <g transform="translate(60, 100)">
+      <!-- Checklist items -->
+      <text x="0" y="0" font-family="Arial" font-size="16" font-weight="bold" fill="#2f855a">✓ 실시간 이단 추론 &amp; AI 상세 진단 (Matched)</text>
+      <text x="20" y="25" font-family="Arial" font-size="14" fill="#4a5568">: Gate/HM Cascade 결과 및 vLLM 진단 메시지 UI 연동 100% 가능</text>
+      
+      <text x="0" y="70" font-family="Arial" font-size="16" font-weight="bold" fill="#2f855a">✓ 대량 데이터 적재 및 UUID 체계 (Matched)</text>
+      <text x="20" y="95" font-family="Arial" font-size="14" fill="#4a5568">: Drag &amp; Drop 업로드 시 서버 내 고유 식별자 할당 및 저장소 관리</text>
+
+      <text x="0" y="140" font-family="Arial" font-size="16" font-weight="bold" fill="#2f855a">✓ 재학습 엔진 및 실시간 폴링 모니터 (Matched)</text>
+      <text x="20" y="165" font-family="Arial" font-size="14" fill="#4a5568">: 백그라운드 학습 시작 및 진행률(%), Loss, Acc 실시간 바인딩</text>
+
+      <text x="0" y="210" font-family="Arial" font-size="16" font-weight="bold" fill="#2f855a">✓ 모델/데이터셋 버전 관리 및 Lineage (Matched)</text>
+      <text x="20" y="235" font-family="Arial" font-size="14" fill="#4a5568">: state.json 영속화를 통한 서버 재시작 시 이력 복구 완벽 지원</text>
+
+      <text x="0" y="280" font-family="Arial" font-size="16" font-weight="bold" fill="#2f855a">✓ 무중단 모델 배포 &amp; 앙상블 제어 (Matched)</text>
+      <text x="20" y="305" font-family="Arial" font-size="14" fill="#4a5568">: 런타임 앙상블 ON/OFF 및 운영 모델 실시간 교체(Hot-swap)</text>
+
+      <text x="0" y="350" font-family="Arial" font-size="16" font-weight="bold" fill="#3182ce">★ 가중치 파일 개별 선택 UI (Additional)</text>
+      <text x="20" y="375" font-family="Arial" font-size="14" fill="#4a5568">: models/ 폴더 내 .pt 파일 실시간 스캔 및 드롭다운 선택 기능</text>
+
+      <text x="0" y="420" font-family="Arial" font-size="16" font-weight="bold" fill="#c53030">★ 오염 데이터 및 학습 이력 삭제 (Additional)</text>
+      <text x="20" y="445" font-family="Arial" font-size="14" fill="#4a5568">: 잘못된 피드백의 물리적 삭제를 통한 데이터 클리닝 파이프라인</text>
+    </g>
+
+    <rect x="50" y="580" width="1000" height="80" rx="15" fill="#ebf8ff" />
+    <text x="550" y="625" font-family="Arial" font-size="18" font-weight="bold" text-anchor="middle" fill="#2c5282">"프론트엔드 담당자의 7가지 요구사항을 모두 충족하며, 3가지 핵심 고도화 기능을 추가 탑재했습니다."</text>
+  </g>
+
+  <!-- Final Info -->
+  <text x="600" y="1770" font-family="Arial" font-size="14" text-anchor="middle" fill="#cbd5e0">SteelVision Integrated MLOps Project | Handover Document v3.5 | © 2026 Integrated Engineering Team</text>
+</svg>

@@ -16,26 +16,26 @@ export type DatasetVersion = {
   id: string;
   name: string;
   status: string;
-  created_at: string;
-  updated_at: string;
-  source_dataset_id: string | null;
+  created_at?: string;
+  updated_at?: string;
+  source_dataset_id?: string | null;
   sample_count: number;
   feedback_count: number;
   notes?: string;
-  samples: DatasetSample[];
+  samples?: DatasetSample[];
 };
 
 export type Architecture = {
   id: string;
   name: string;
-  kind: "gate" | "heatmap";
-  source: string;
-  created_at: string;
-  interface: {
+  kind: "gate" | "heatmap" | string;
+  source?: string;
+  created_at?: string;
+  interface?: {
     input: string;
     output: string;
   };
-  file_url: string | null;
+  file_url?: string | null;
 };
 
 export type TrainingRecipe = {
@@ -57,20 +57,23 @@ export type TrainingRecipe = {
 
 export type TrainingRun = {
   id: string;
-  status: string;
-  created_at: string;
-  dataset_version_id: string;
+  status?: string;
+  created_at?: string;
+  dataset_version_id?: string;
   base_model_version_id?: string | null;
-  gate_architecture_id: string;
-  heatmap_architecture_id: string;
+  gate_architecture_id?: string;
+  heatmap_architecture_id?: string;
+  architecture?: string;
+  params?: Record<string, unknown>;
+  final_metrics?: Record<string, number>;
   recipe_id?: string;
   recipe?: TrainingRecipe;
   target_line?: string | null;
   epochs?: number;
-  train_strategy: string;
-  notes: string;
-  lineage: string;
-  sample_count: number;
+  train_strategy?: string;
+  notes?: string;
+  lineage?: string;
+  sample_count?: number;
   progress?: number;
   current_step?: string;
   started_at?: string | null;
@@ -84,16 +87,18 @@ export type ModelVersion = {
   id: string;
   name: string;
   status: string;
-  dataset_version_id: string | null;
-  gate_architecture_id: string;
-  heatmap_architecture_id: string;
-  created_at: string;
+  dataset_version_id?: string | null;
+  gate_architecture_id?: string;
+  heatmap_architecture_id?: string;
+  created_at?: string;
   updated_at?: string;
   metrics: {
-    f1: number | null;
-    latency_ms: number | null;
+    f1?: number | null;
+    latency_ms?: number | null;
+    loss?: number | null;
+    acc?: number | null;
   };
-  lineage: string;
+  lineage?: string;
   training_run_id?: string;
   base_model_version_id?: string | null;
   recipe_id?: string;
@@ -105,14 +110,19 @@ export type ModelVersion = {
 
 export type FeedbackItem = {
   id: string;
-  sample_id: string;
-  dataset_version_id: string;
+  sample_id?: string;
+  dataset_version_id?: string;
   feedback_type: string;
   label: string;
   operator: string;
   comment: string;
-  line: string;
-  predicted_label: string;
+  line?: string;
+  predicted_label?: string;
+  model_prediction?: {
+    gate_score?: number;
+    heatmap_score?: number;
+    predicted_label?: string;
+  };
   image_url: string;
   created_at: string;
 };
@@ -138,11 +148,16 @@ export type DashboardResponse = {
   active_dataset_id: string;
   dataset_versions: DatasetVersion[];
   architectures: Architecture[];
-  training_recipes: TrainingRecipe[];
+  training_recipes?: TrainingRecipe[];
   training_runs: TrainingRun[];
   model_versions: ModelVersion[];
   feedback_items: FeedbackItem[];
   logs: LogItem[];
-  deployment: DeploymentState;
-  interfaces: Record<string, string>;
+  deployment?: DeploymentState;
+  interfaces?: Record<string, string>;
+  available_model_files?: string[];
+  runtime_config?: {
+    ensemble_enabled?: boolean;
+    current_model_id?: string | null;
+  };
 };

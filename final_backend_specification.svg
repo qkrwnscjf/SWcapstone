@@ -1,0 +1,47 @@
+<svg width="1300" height="1650" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background -->
+  <rect width="1300" height="1650" fill="#f8f9fa" />
+  
+  <!-- Main Title -->
+  <text x="650" y="60" font-family="Arial, sans-serif" font-size="36" font-weight="bold" text-anchor="middle" fill="#2c3e50">SteelVision MLOps: 최종 통합 아키텍처 명세 (v3.5)</text>
+  <text x="650" y="100" font-family="Arial, sans-serif" font-size="20" text-anchor="middle" fill="#7f8c8d">Dynamic Weight Selection &amp; Real-time Hot-swapping System</text>
+
+  <!-- Section: Deployment Detail (Focusing on the new feature) -->
+  <rect x="50" y="150" width="1200" height="350" rx="15" fill="#ebf5fb" stroke="#2980b9" stroke-width="3" />
+  <text x="80" y="190" font-family="Arial, sans-serif" font-size="24" font-weight="bold" fill="#2471a3">1. 운영 모델 동적 배포 엔진 (Hot-swap Engine)</text>
+  
+  <g transform="translate(80, 215)">
+    <rect width="1100" height="250" rx="10" fill="white" stroke="#3498db" />
+    <text x="30" y="45" font-family="Arial, sans-serif" font-size="18" font-weight="bold" fill="#2980b9">[NEW] 가중치 파일 선택 및 핫스와핑 (Weight Selection)</text>
+    <text x="40" y="85" font-family="Arial, sans-serif" font-size="15" fill="#333">• [Discovery] 서버 가동 중 models/*.pt 파일 리스트 실시간 스캔 및 대시보드 전송</text>
+    <text x="40" y="115" font-family="Arial, sans-serif" font-size="15" fill="#333">• [Selection] UI 운영 모델 탭에서 Gate/Heatmap 파일을 개별적으로 선택 가능</text>
+    <text x="40" y="145" font-family="Arial, sans-serif" font-size="15" fill="#333">• [Loading] /mlops/deploy 호출 시 선택된 가중치를 GPU/CPU 메모리에 즉시 Hot-load</text>
+    <text x="40" y="175" font-family="Arial, sans-serif" font-size="15" fill="#333">• [Seamless] 서비스 중단 없이 실시간 추론 정확도 테스트 및 앙상블 모드 적용</text>
+    <text x="40" y="210" font-family="Arial, sans-serif" font-size="15" font-weight="bold" fill="#27ae60">→ "현장의 변화에 따라 즉각적으로 판단 기준(Weights)을 교체하는 민첩성 확보"</text>
+  </g>
+
+  <!-- Other Sections (Summarized for clarity) -->
+  <rect x="50" y="520" width="1200" height="480" rx="15" fill="#f4ecf7" stroke="#8e44ad" stroke-width="3" />
+  <text x="80" y="565" font-family="Arial, sans-serif" font-size="24" font-weight="bold" fill="#6c3483">2. 프론트엔드 요구사항 최종 충족도</text>
+  <g transform="translate(100, 600)">
+    <text x="0" y="30" font-family="Arial, sans-serif" font-size="15" font-weight="bold">• 데이터셋 업로드 및 누적</text><text x="400" y="30" font-family="Arial, sans-serif" font-size="15" fill="#27ae60">Done (POST /datasets/upload)</text>
+    <text x="0" y="70" font-family="Arial, sans-serif" font-size="15" font-weight="bold">• 모델 재학습 및 실시간 모니터링</text><text x="400" y="70" font-family="Arial, sans-serif" font-size="15" fill="#27ae60">Done (POST /train &amp; GET /status)</text>
+    <text x="0" y="110" font-family="Arial, sans-serif" font-size="15" font-weight="bold">• 모델 버전 관리 및 배포 승격</text><text x="400" y="110" font-family="Arial, sans-serif" font-size="15" fill="#27ae60">Done (POST /deploy)</text>
+    <text x="0" y="150" font-family="Arial, sans-serif" font-size="15" font-weight="bold">• 현장 피드백 및 이미지 삭제</text><text x="400" y="150" font-family="Arial, sans-serif" font-size="15" fill="#27ae60">Done (POST /feedback &amp; DELETE)</text>
+    <text x="0" y="190" font-family="Arial, sans-serif" font-size="15" font-weight="bold" fill="#2980b9">• [특화] 가중치 파일 선택 UI</text><text x="400" y="190" font-family="Arial, sans-serif" font-size="15" fill="#2980b9">Done (Available Models Scan)</text>
+  </g>
+
+  <!-- Final Loop -->
+  <rect x="50" y="1030" width="1200" height="520" rx="15" fill="#fdf2e9" stroke="#e67e22" stroke-width="3" />
+  <text x="80" y="1075" font-family="Arial, sans-serif" font-size="24" font-weight="bold" fill="#d35400">3. 가중치 선택 및 배포 사이클 (The Optimization Loop)</text>
+  <g transform="translate(150, 1120)">
+    <circle cx="150" cy="150" r="80" fill="none" stroke="#e67e22" stroke-width="4" stroke-dasharray="8,4" />
+    <text x="150" y="155" font-family="Arial, sans-serif" font-size="16" font-weight="bold" text-anchor="middle" fill="#d35400">Weight Switch</text>
+    <path d="M 230 150 L 350 150" stroke="#e67e22" stroke-width="3" marker-end="url(#arrowhead)" />
+    <rect x="370" y="100" width="600" height="120" rx="15" fill="white" stroke="#2980b9" stroke-width="2" />
+    <text x="400" y="140" font-family="Arial, sans-serif" font-size="16" font-weight="bold" fill="#2980b9">사용자 중심 모델 검증 (Human-in-the-loop)</text>
+    <text x="400" y="170" font-family="Arial, sans-serif" font-size="14" fill="#555">작업자가 UI에서 직접 여러 가중치 파일 중 최적의 것을 선택하여</text>
+    <text x="400" y="190" font-family="Arial, sans-serif" font-size="14" fill="#555">실시간 추론 성능을 검증하고 즉각 교체하는 최신 MLOps 워크플로우</text>
+  </g>
+  <defs><marker id="arrowhead" markerWidth="10" markerHeight="7" refX="0" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#e67e22" /></marker></defs>
+</svg>

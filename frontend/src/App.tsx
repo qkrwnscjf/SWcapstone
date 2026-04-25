@@ -137,6 +137,21 @@ function formatMetric(value?: number | null, digits = 3) {
   return value.toFixed(digits);
 }
 
+function formatKoreaTimestamp(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Seoul",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).formatToParts(date);
+  const get = (type: string) => parts.find((part) => part.type === type)?.value ?? "00";
+  return `${get("year")}-${get("month")}-${get("day")} ${get("hour")}:${get("minute")}:${get("second")} KST`;
+}
+
 function asset(path: string) {
   if (!path) return "";
   return path.startsWith("http") || path.startsWith("data:") ? path : `${API_BASE}${path}`;
@@ -692,14 +707,16 @@ function FieldPage({
 
       const result = await predictAnomaly(selectedFile);
       setPredictResult(result);
-      setOverlayImageUrl(result.heatmap_overlay ? `data:image/png;base64,${result.heatmap_overlay}` : "");
-      setHeatmapImageUrl(
-        result.normalized_score_heatmap ? `data:image/png;base64,${result.normalized_score_heatmap}` : ""
-      );
+      const overlayUrl = result.heatmap_overlay ? `data:image/png;base64,${result.heatmap_overlay}` : "";
+      const heatmapUrl = result.normalized_score_heatmap
+        ? `data:image/png;base64,${result.normalized_score_heatmap}`
+        : overlayUrl;
+      setOverlayImageUrl(overlayUrl);
+      setHeatmapImageUrl(heatmapUrl);
 
-      if (result.heatmap_overlay) {
+      if (overlayUrl) {
         setMode("overlay");
-      } else if (result.normalized_score_heatmap) {
+      } else if (heatmapUrl) {
         setMode("heatmap");
       } else {
         setMode("raw");
@@ -1102,7 +1119,8 @@ function DeploymentCard({
   return (
     <div className={cls("rounded-2xl border-2 p-4", toneMap[tone])}>
       <div className="text-sm font-semibold">{title}</div>
-      <div className="mt-2 text-2xl font-bold">{model?.id ?? "-"}</div>
+      <div className="mt-2 text-2xl font-bold">{model?.name ?? model?.id ?? "-"}</div>
+      {model?.name ? <div className="mt-1 text-xs opacity-70">{model.id}</div> : null}
       <div className="mt-2 text-sm opacity-80">{subtitle}</div>
       <div className="mt-2 text-sm opacity-80">
         F1 {model?.metrics.f1 ?? "-"} / {model?.metrics.latency_ms ?? "-"}ms
@@ -1139,6 +1157,7 @@ function TrainDeployView({
   const [selectedRunId, setSelectedRunId] = useState(dashboard.training_runs[0]?.id ?? "");
   const [selectedDeployModelId, setSelectedDeployModelId] = useState(defaultDeployModelId);
   const [selectedTargetLine, setSelectedTargetLine] = useState<LineId>("LINE-B");
+  const [modelName, setModelName] = useState(() => formatKoreaTimestamp());
 
   useEffect(() => {
     if (!dashboard.dataset_versions.some((dataset) => dataset.id === selectedDatasetId)) {
@@ -1195,6 +1214,8 @@ function TrainDeployView({
       setBusyAction("train");
       setMessage("");
       const result = await createTrainingRun({
+        modelName: modelName.trim() || formatKoreaTimestamp(),
+        knownModelIds: dashboard.model_versions.map((model) => model.id),
         datasetVersionId: selectedDatasetId,
         baseModelVersionId: selectedBaseModelId,
         recipeId: selectedRecipeId,
@@ -1208,9 +1229,13 @@ function TrainDeployView({
       const createdModel = (result as { model_version?: ModelVersion }).model_version;
       if (createdRun?.id) setSelectedRunId(createdRun.id);
       if (createdModel?.id) setSelectedDeployModelId(createdModel.id);
+      setModelName(formatKoreaTimestamp());
       setMessage("학습 구성이 저장되고 staging 후보 모델이 등록되었습니다. 실제 학습은 아직 시작되지 않았습니다.");
       await onRefresh();
     } catch (error) {
+      if (error instanceof Error && /training in progress/i.test(error.message)) {
+        await onRefresh();
+      }
       setMessage(error instanceof Error ? error.message : "학습 구성 저장에 실패했습니다.");
     } finally {
       setBusyAction(null);
@@ -1304,7 +1329,7 @@ function TrainDeployView({
           {message ? <div className="mb-4"><MessageBanner message={message} tone="blue" /></div> : null}
 
           <div className="min-h-0 overflow-auto pr-1">
-            <div className="grid grid-cols-3 gap-3">
+            <div className="grid grid-cols-4 gap-3">
               <label className="rounded-2xl border-2 border-slate-200 bg-slate-50 p-4">
                 <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-400">Dataset</div>
                 <select
@@ -1443,12 +1468,13 @@ function TrainDeployView({
                 >
                   {dashboard.model_versions.map((model) => (
                     <option key={model.id} value={model.id}>
-                      {model.id} · {model.status} · {model.recipe_id ?? "baseline"}
+                      {model.name ?? model.id} · {model.status} · {model.recipe_id ?? "baseline"}
                     </option>
                   ))}
                 </select>
               </label>
               <div className="grid grid-cols-2 gap-3 text-sm text-slate-600">
+                <div>모델 이름: {selectedDeployModel?.name ?? "-"}</div>
                 <div>기준 모델: {selectedDeployModel?.base_model_version_id ?? "-"}</div>
                 <div>데이터셋: {selectedDeployModel?.dataset_version_id ?? "-"}</div>
                 <div>레시피: {selectedDeployModel?.recipe_id ?? "-"}</div>
@@ -1530,6 +1556,7 @@ function TrainDeployViewV2({
   const [selectedDeployModelId, setSelectedDeployModelId] = useState(defaultDeployModelId);
   const [selectedCanaryLine, setSelectedCanaryLine] = useState<LineId>("LINE-B");
   const [epochCount, setEpochCount] = useState(firstRecipe?.default_epochs ?? 3);
+  const [modelName, setModelName] = useState(() => formatKoreaTimestamp());
   const [recipeDraft, setRecipeDraft] = useState<TrainingRecipe>(() => recipeDraftFrom(firstRecipe));
 
   const activeRun =
@@ -1595,6 +1622,8 @@ function TrainDeployViewV2({
       setBusyAction("train");
       setMessage("");
       const result = await createTrainingRun({
+        modelName: modelName.trim() || formatKoreaTimestamp(),
+        knownModelIds: dashboard.model_versions.map((model) => model.id),
         datasetVersionId: selectedDatasetId,
         baseModelVersionId: selectedBaseModelId,
         recipeId: selectedRecipeId,
@@ -1606,9 +1635,13 @@ function TrainDeployViewV2({
       });
       const createdModel = (result as { model_version?: ModelVersion }).model_version;
       if (createdModel?.id) setSelectedDeployModelId(createdModel.id);
+      setModelName(formatKoreaTimestamp());
       setMessage("CPU 학습을 시작했습니다. 상태 바는 자동 갱신됩니다.");
       await onRefresh();
     } catch (error) {
+      if (error instanceof Error && /training in progress/i.test(error.message)) {
+        await onRefresh();
+      }
       setMessage(error instanceof Error ? error.message : "학습 시작에 실패했습니다.");
     } finally {
       setBusyAction(null);
@@ -1766,6 +1799,24 @@ function TrainDeployViewV2({
               </label>
 
               <label className="rounded-2xl border-2 border-slate-200 bg-slate-50 p-4">
+                <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-400">Model Name</div>
+                <div className="mt-2 flex gap-2">
+                  <input
+                    value={modelName}
+                    onChange={(event) => setModelName(event.target.value)}
+                    className="min-w-0 flex-1 rounded-xl border-2 border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900 outline-none focus:border-blue-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setModelName(formatKoreaTimestamp())}
+                    className="rounded-xl border-2 border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-700"
+                  >
+                    KST
+                  </button>
+                </div>
+              </label>
+
+              <label className="rounded-2xl border-2 border-slate-200 bg-slate-50 p-4">
                 <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-400">Epoch</div>
                 <input
                   type="number"
@@ -1852,7 +1903,7 @@ function TrainDeployViewV2({
                 <div>
                   <div className="text-sm font-bold text-slate-950">학습 상태</div>
                   <div className="mt-1 text-sm text-slate-500">
-                    {latestRun ? `${latestRun.id} · ${latestRun.status}` : "아직 학습 런이 없습니다."}
+                    {latestRun ? `${latestRun.name ?? latestRun.id} · ${latestRun.status}` : "아직 학습 런이 없습니다."}
                   </div>
                 </div>
                 <Badge tone={runTone}>{latestRun?.current_step ?? "ready"}</Badge>
@@ -1863,7 +1914,7 @@ function TrainDeployViewV2({
               <div className="mt-2 flex justify-between text-xs font-semibold text-slate-500">
                 <span>{runProgress}%</span>
                 <span>{latestRun?.device ?? "cpu"}</span>
-                <span>{latestRun?.recipe?.name ?? selectedRecipe?.name ?? "-"}</span>
+                <span>{latestRun?.name ?? latestRun?.recipe?.name ?? selectedRecipe?.name ?? "-"}</span>
               </div>
               {latestRun?.logs?.length ? (
                 <div className="mt-3 max-h-24 overflow-auto rounded-xl bg-slate-950 p-3 font-mono text-xs text-slate-100">
@@ -1910,7 +1961,7 @@ function TrainDeployViewV2({
                 >
                   {dashboard.model_versions.map((model) => (
                     <option key={model.id} value={model.id}>
-                      {model.id} · {model.status} · {model.recipe_id ?? "baseline"}
+                      {model.name ?? model.id} · {model.status} · {model.recipe_id ?? "baseline"}
                     </option>
                   ))}
                 </select>
@@ -1929,6 +1980,7 @@ function TrainDeployViewV2({
                 <div>기준 모델: {selectedDeployModel?.base_model_version_id ?? "-"}</div>
                 <div>데이터셋: {selectedDeployModel?.dataset_version_id ?? "-"}</div>
                 <div>레시피: {selectedDeployModel?.recipe_id ?? "-"}</div>
+                <div>모델 이름: {selectedDeployModel?.name ?? "-"}</div>
                 <div>Canary 라인: {selectedCanaryLine}</div>
               </div>
             </div>
@@ -1987,6 +2039,7 @@ function VersionViewV2({
         targetDatasetId,
         datasetName: mode === "new" ? datasetName : undefined,
         feedbackItemIds: dashboard.feedback_items.map((item) => item.id),
+        feedbackItems: dashboard.feedback_items,
       });
       setMessage(mode === "new" ? "피드백 묶음으로 새 데이터셋을 만들었습니다." : "피드백 묶음을 기존 데이터셋에 추가했습니다.");
       await onRefresh();
@@ -2430,7 +2483,7 @@ export default function App() {
     if (!hasActiveTraining) return;
     const timer = window.setInterval(() => {
       void refresh();
-    }, 3000);
+    }, 1000);
     return () => window.clearInterval(timer);
   }, [hasActiveTraining]);
 

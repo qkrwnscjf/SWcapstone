@@ -57,6 +57,7 @@ export type TrainingRecipe = {
 
 export type TrainingRun = {
   id: string;
+  name?: string;
   status?: string;
   created_at?: string;
   dataset_version_id?: string;

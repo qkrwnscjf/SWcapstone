@@ -1,0 +1,89 @@
+<svg width="1400" height="1800" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background -->
+  <rect width="1400" height="1800" fill="#fcfcfc" />
+  
+  <!-- Main Title -->
+  <text x="700" y="70" font-family="Arial, sans-serif" font-size="40" font-weight="bold" text-anchor="middle" fill="#1a202c">SteelVision: 통합 MLOps 에코시스템 명세서</text>
+  <text x="700" y="110" font-family="Arial, sans-serif" font-size="20" text-anchor="middle" fill="#718096">Comprehensive Full-Stack Framework for Cascade Anomaly Detection</text>
+
+  <!-- Section 1: Intelligent Core Engine (추론 및 진단) -->
+  <rect x="60" y="160" width="1280" height="380" rx="20" fill="#ebf8ff" stroke="#3182ce" stroke-width="3" />
+  <text x="90" y="210" font-family="Arial, sans-serif" font-size="26" font-weight="bold" fill="#2c5282">1. 지능형 추론 및 진단 코어 (The Brain)</text>
+  
+  <g transform="translate(90, 240)">
+    <!-- Feature 1.1 -->
+    <rect width="380" height="260" rx="15" fill="white" stroke="#3182ce" />
+    <text x="20" y="40" font-family="Arial, sans-serif" font-size="20" font-weight="bold" fill="#2c5282">실시간 이단 추론 (Cascade)</text>
+    <text x="20" y="80" font-family="Arial, sans-serif" font-size="15" fill="#4a5568">• [Gate] EfficientNet-B0 기반 1차 스크리닝</text>
+    <text x="20" y="110" font-family="Arial, sans-serif" font-size="15" fill="#4a5568">• [Logic] T_low 임계값 기반 정상 데이터 즉시 통과</text>
+    <text x="20" y="140" font-family="Arial, sans-serif" font-size="15" fill="#4a5568">• [HM] PatchCore 기반 픽셀 단위 결함 국지화</text>
+    <text x="20" y="170" font-family="Arial, sans-serif" font-size="15" fill="#2c5282" font-weight="bold">→ 연산 자원 70% 절감 및 높은 정밀도 달성</text>
+
+    <!-- Feature 1.2 -->
+    <rect x="410" width="380" height="260" rx="15" fill="white" stroke="#3182ce" />
+    <text x="430" y="40" font-family="Arial, sans-serif" font-size="20" font-weight="bold" fill="#2c5282">지능형 결함 진단 (Diagnosis)</text>
+    <text x="430" y="80" font-family="Arial, sans-serif" font-size="15" fill="#4a5568">• vLLM 연동을 통한 결함 원인 자동 서술</text>
+    <text x="430" y="110" font-family="Arial, sans-serif" font-size="15" fill="#4a5568">• "표면 오염" vs "물리 파손" 실시간 구분</text>
+    <text x="430" y="140" font-family="Arial, sans-serif" font-size="15" fill="#4a5568">• UI용 Base64 히트맵 오버레이 실시간 생성</text>
+    <text x="430" y="170" font-family="Arial, sans-serif" font-size="15" fill="#2c5282" font-weight="bold">→ 현장 작업자의 직관적 의사결정 지원</text>
+
+    <!-- Feature 1.3 -->
+    <rect x="820" width="380" height="260" rx="15" fill="white" stroke="#3182ce" />
+    <text x="840" y="40" font-family="Arial, sans-serif" font-size="20" font-weight="bold" fill="#2c5282">추론 모드 오케스트레이션</text>
+    <text x="840" y="80" font-family="Arial, sans-serif" font-size="15" fill="#4a5568">• [Ensemble] Gate-HM 협업 모드 지원</text>
+    <text x="840" y="110" font-family="Arial, sans-serif" font-size="15" fill="#4a5568">• [Solo] 고속 판정을 위한 Gate 단독 모드</text>
+    <text x="840" y="140" font-family="Arial, sans-serif" font-size="15" fill="#4a5568">• 런타임 환경 설정 실시간 반영 (Hot-swap)</text>
+    <text x="840" y="170" font-family="Arial, sans-serif" font-size="15" fill="#2c5282" font-weight="bold">→ 부하 및 상황에 따른 탄력적 운영 가능</text>
+  </g>
+
+  <!-- Section 2: MLOps Management (관리 및 개선) -->
+  <rect x="60" y="580" width="1280" height="420" rx="20" fill="#f0fff4" stroke="#38a169" stroke-width="3" />
+  <text x="90" y="630" font-family="Arial, sans-serif" font-size="26" font-weight="bold" fill="#22543d">2. MLOps 라이프사이클 제어 (The Control)</text>
+
+  <g transform="translate(90, 660)">
+    <rect width="600" height="300" rx="15" fill="white" stroke="#38a169" />
+    <text x="20" y="40" font-family="Arial, sans-serif" font-size="20" font-weight="bold" fill="#22543d">학습 및 배포 파이프라인</text>
+    <text x="20" y="80" font-family="Arial, sans-serif" font-size="15" fill="#4a5568">• [Retrain] UI 버튼 클릭 시 백그라운드 학습 개시</text>
+    <text x="20" y="110" font-family="Arial, sans-serif" font-size="15" fill="#4a5568">• [Monitor] Epoch, Loss, Accuracy 실시간 추적</text>
+    <text x="20" y="140" font-family="Arial, sans-serif" font-size="15" fill="#4a5568">• [Deploy] 학습 완료된 후보 모델 운영 즉시 투입</text>
+    <text x="20" y="170" font-family="Arial, sans-serif" font-size="15" fill="#4a5568">• [Version] 데이터/모델 버전 스냅샷 자동 관리</text>
+
+    <rect x="630" width="600" height="300" rx="15" fill="white" stroke="#38a169" />
+    <text x="650" y="40" font-family="Arial, sans-serif" font-size="20" font-weight="bold" fill="#22543d">데이터 가치 사슬 (Data Value Chain)</text>
+    <text x="650" y="80" font-family="Arial, sans-serif" font-size="15" fill="#4a5568">• [Ingest] 드래그 앤 드롭 기반 대량 데이터 수집</text>
+    <text x="650" y="110" font-family="Arial, sans-serif" font-size="15" fill="#4a5568">• [Feedback] 작업자 피드백을 통한 오답 셋 자동 구축</text>
+    <text x="650" y="140" font-family="Arial, sans-serif" font-size="15" fill="#e53e3e" font-weight="bold">• [Clean] 불필요 이미지/학습 런의 물리적 삭제 (NEW)</text>
+    <text x="650" y="170" font-family="Arial, sans-serif" font-size="15" fill="#4a5568">• [Tracking] 피드백 시점의 모델 예측값 동시 보존</text>
+  </g>
+
+  <!-- Section 3: User Interface & Experience (사용자 경험) -->
+  <rect x="60" y="1040" width="1280" height="320" rx="20" fill="#fff5f5" stroke="#e53e3e" stroke-width="3" />
+  <text x="90" y="1090" font-family="Arial, sans-serif" font-size="26" font-weight="bold" fill="#742a2a">3. 통합 UI 및 플랫폼 최적화 (The Experience)</text>
+
+  <g transform="translate(90, 1120)">
+    <rect width="1190" height="200" rx="15" fill="white" stroke="#e53e3e" stroke-dasharray="8" />
+    <text x="30" y="50" font-family="Arial, sans-serif" font-size="18" font-weight="bold" fill="#742a2a">[멀티 아키텍처 지원 범용 배포]</text>
+    <text x="40" y="85" font-family="Arial, sans-serif" font-size="15" fill="#4a5568">- Windows(개발), Mac(사용자), Linux(서버) 환경에서 충돌 없는 실행 (Platform Agnostic)</text>
+    <text x="40" y="110" font-family="Arial, sans-serif" font-size="15" fill="#4a5568">- 도커 컴포즈 기반 명령어 한 줄로 프론트-백엔드-모델 자동 연동</text>
+    
+    <text x="30" y="155" font-family="Arial, sans-serif" font-size="18" font-weight="bold" fill="#742a2a">[프론트엔드 담당자 디자인 보존]</text>
+    <text x="40" y="185" font-family="Arial, sans-serif" font-size="15" fill="#4a5568">- 기존 레이아웃 및 Tailwind 스타일 완벽 유지 + 스텔스 API 바인딩 기법 적용</text>
+  </g>
+
+  <!-- Section 4: Architecture Loop (개선 사이클) -->
+  <rect x="60" y="1400" width="1280" height="320" rx="20" fill="#fffaf0" stroke="#dd6b20" stroke-width="3" />
+  <text x="90" y="1450" font-family="Arial, sans-serif" font-size="26" font-weight="bold" fill="#7b341e">4. 가중치 개선 및 데이터 정제 사이클 (The Improvement Loop)</text>
+
+  <g transform="translate(90, 1480)">
+    <path d="M 50 100 Q 150 0, 250 100 T 450 100" fill="none" stroke="#dd6b20" stroke-width="3" stroke-dasharray="10,5" />
+    <text x="600" y="50" font-family="Arial, sans-serif" font-size="18" font-weight="bold" text-anchor="middle" fill="#7b341e">데이터 수집 (Feedback)</text>
+    <text x="600" y="100" font-family="Arial, sans-serif" font-size="18" font-weight="bold" text-anchor="middle" fill="#c53030">데이터 정제 (Clean/Delete)</text>
+    <text x="600" y="150" font-family="Arial, sans-serif" font-size="18" font-weight="bold" text-anchor="middle" fill="#2f855a">가중치 재학습 (Retrain)</text>
+    <text x="600" y="200" font-family="Arial, sans-serif" font-size="18" font-weight="bold" text-anchor="middle" fill="#2b6cb0">배포 및 적용 (Deploy)</text>
+    <text x="1100" y="125" font-family="Arial, sans-serif" font-size="22" font-weight="bold" text-anchor="middle" fill="#7b341e">"시간이 흐를수록 성능이"</text>
+    <text x="1100" y="165" font-family="Arial, sans-serif" font-size="22" font-weight="bold" text-anchor="middle" fill="#7b341e">"스스로 향상되는 시스템"</text>
+  </g>
+
+  <!-- Footer -->
+  <text x="700" y="1770" font-family="Arial, sans-serif" font-size="16" text-anchor="middle" fill="#a0aec0">SteelVision MLOps Integrated Framework | Final Specification v5.0 | © 2026 Developer Team Core</text>
+</svg>

@@ -1,0 +1,18 @@
+FROM node:20-alpine
+
+WORKDIR /app
+
+# 캐시 효율을 위해 package.json만 먼저 복사
+COPY package.json package-lock.json* ./
+
+# 의존성 설치 (타입 정의 포함)
+RUN npm install --frozen-lockfile || npm install
+
+# 나머지 파일 복사
+COPY . .
+
+# 5173 포트 오픈
+EXPOSE 5173
+
+# 개발 서버 기동 (호스트 바인딩 필수)
+CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]

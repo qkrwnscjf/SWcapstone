@@ -1,0 +1,100 @@
+{
+  "active_dataset_id": "DATA-V3-PRODUCTION",
+  "dataset_versions": [
+    {
+      "id": "DATA-V3-PRODUCTION",
+      "name": "Round 3 Pool",
+      "status": "locked",
+      "sample_count": 14850,
+      "feedback_count": 0,
+      "samples": [],
+      "updated_at": "2026-04-15T04:50:56"
+    }
+  ],
+  "model_versions": [
+    {
+      "id": "MODEL-R3-FINAL",
+      "status": "production",
+      "metrics": {
+        "f1": 0.94
+      },
+      "lineage": "Round 3 Cascade"
+    }
+  ],
+  "training_runs": [],
+  "feedback_items": [],
+  "logs": [
+    {
+      "id": "D6828120",
+      "time": "2026-04-24T08:01:05",
+      "level": "warning",
+      "message": "Data Removed: FDBK-849CF361"
+    },
+    {
+      "id": "2EB3F8AB",
+      "time": "2026-04-24T08:01:03",
+      "level": "warning",
+      "message": "Data Removed: FDBK-2FBC29B4"
+    },
+    {
+      "id": "91E5C21D",
+      "time": "2026-04-24T08:01:01",
+      "level": "warning",
+      "message": "Data Removed: FDBK-6A00CD7F"
+    },
+    {
+      "id": "4CD95D3B",
+      "time": "2026-04-24T08:00:50",
+      "level": "info",
+      "message": "Data Ingested: confirmed_anomaly (Actual: anomaly)"
+    },
+    {
+      "id": "914FE251",
+      "time": "2026-04-24T08:00:49",
+      "level": "info",
+      "message": "Data Ingested: false_negative (Actual: anomaly)"
+    },
+    {
+      "id": "BFF9C757",
+      "time": "2026-04-24T08:00:47",
+      "level": "info",
+      "message": "Data Ingested: false_positive (Actual: normal)"
+    },
+    {
+      "id": "76BA597B",
+      "time": "2026-04-24T07:39:45",
+      "level": "warning",
+      "message": "Data Removed: FDBK-A3145171"
+    },
+    {
+      "id": "EECD7BD4",
+      "time": "2026-04-24T07:39:40",
+      "level": "info",
+      "message": "Data Ingested: false_positive (Actual: normal)"
+    },
+    {
+      "id": "22CE1F85",
+      "time": "2026-04-15T04:52:17",
+      "level": "warning",
+      "message": "Data Removed: FDBK-E2D8E786"
+    },
+    {
+      "id": "B6228BA5",
+      "time": "2026-04-15T04:52:03",
+      "level": "info",
+      "message": "Data Ingested: confirmed_anomaly (26361a4890a84f579816797f0b19dd2e.png)"
+    }
+  ],
+  "architectures": [
+    {
+      "id": "ARCH-GATE-EFF",
+      "name": "EffNet-B0",
+      "kind": "gate"
+    },
+    {
+      "id": "ARCH-HM-PC",
+      "name": "PatchCore-R18",
+      "kind": "heatmap"
+    }
+  ]
+}

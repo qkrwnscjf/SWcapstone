@@ -12,3 +12,8 @@
 
 6. http://localhost:5173/ 로 접속한다.
 ![alt text](image.png)
+
+
+# 참고 사항
+
+1. docker compose build backend하실 때 오류가 생기는데요, 임시로 backend폴더 내에 임시로 비어있는 폴더를 만들어주시면 됩니다. (예시) C:\OSYSTUDY\260423\SWcapstone\backend\models

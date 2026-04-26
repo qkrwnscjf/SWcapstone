@@ -16,4 +16,4 @@
 
 # 참고 사항
 
-1. docker compose build backend하실 때 오류가 생기는데요, 임시로 backend폴더 내에 임시로 비어있는 폴더를 만들어주시면 됩니다. (예시) C:\OSYSTUDY\260423\SWcapstone\backend\models
+1. docker compose build backend 하실 때 오류가 생기는데요, 임시로 backend폴더 안에다가 비어있는 폴더를 새로 만들어주시면 됩니다. (예시) C:\OSYSTUDY\260423\SWcapstone\backend\models

@@ -1,0 +1,513 @@
+{
+  "args": {
+    "versions": [
+      "v1",
+      "v2",
+      "v3"
+    ],
+    "test_csv": [
+      "splits_eval/v1_additional_test.csv",
+      "splits_eval/v2_additional_test.csv",
+      "splits_eval/v3_additional_test.csv"
+    ],
+    "gate_model": [
+      "models/round1_effnetb0_gate.pt",
+      "models/round2_effnetb0_gate.pt",
+      "models/round3_effnetb0_gate.pt"
+    ],
+    "gate_calib": [
+      "models/round1_effnetb0_calibrator.pkl",
+      "models/round2_effnetb0_calibrator.pkl",
+      "models/round3_effnetb0_calibrator.pkl"
+    ],
+    "patchcore_model": [
+      "models/round1_patchcore_r18_patchcore.pt",
+      "models/round2_patchcore_r18_patchcore.pt",
+      "models/round3_patchcore_r18_patchcore.pt"
+    ],
+    "data_root_old": "/app/data",
+    "data_root_new": null,
+    "t_low": 0.3,
+    "t_high": 0.7,
+    "device": "mps",
+    "runs": 1,
+    "limit": 30,
+    "output": "reports/benchmark_smoke.json"
+  },
+  "results": [
+    {
+      "version": "v1",
+      "n_samples": 30,
+      "runs": 1,
+      "baseline": {
+        "per_run": [
+          {
+            "accuracy": 1.0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "tp": 30,
+            "fp": 0,
+            "tn": 0,
+            "fn": 0,
+            "threshold": 3.0329959392547607,
+            "latency_ms": {
+              "n": 30,
+              "mean": 98.60678045855214,
+              "std": 34.328280529634675,
+              "median": 91.2242290796712,
+              "p95": 104.37806615373118,
+              "total": 2958.2034137565643
+            },
+            "pipeline": "baseline_patchcore"
+          }
+        ],
+        "aggregate": {
+          "accuracy": {
+            "n": 1,
+            "mean": 1.0,
+            "std": 0.0,
+            "median": 1.0,
+            "p95": 1.0,
+            "total": 1.0
+          },
+          "precision": {
+            "n": 1,
+            "mean": 1.0,
+            "std": 0.0,
+            "median": 1.0,
+            "p95": 1.0,
+            "total": 1.0
+          },
+          "recall": {
+            "n": 1,
+            "mean": 1.0,
+            "std": 0.0,
+            "median": 1.0,
+            "p95": 1.0,
+            "total": 1.0
+          },
+          "f1": {
+            "n": 1,
+            "mean": 1.0,
+            "std": 0.0,
+            "median": 1.0,
+            "p95": 1.0,
+            "total": 1.0
+          },
+          "latency_ms_mean_per_image": {
+            "n": 1,
+            "mean": 98.60678045855214,
+            "std": 0.0,
+            "median": 98.60678045855214,
+            "p95": 98.60678045855214,
+            "total": 98.60678045855214
+          },
+          "latency_ms_total": {
+            "n": 1,
+            "mean": 2958.2034137565643,
+            "std": 0.0,
+            "median": 2958.2034137565643,
+            "p95": 2958.2034137565643,
+            "total": 2958.2034137565643
+          },
+          "latency_ms_std_per_image_avg": 34.328280529634675
+        }
+      },
+      "gate_cascade": {
+        "per_run": [
+          {
+            "accuracy": 1.0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "tp": 30,
+            "fp": 0,
+            "tn": 0,
+            "fn": 0,
+            "t_low": 0.3,
+            "t_high": 0.7,
+            "patchcore_threshold": 3.0329959392547607,
+            "heatmap_call_rate": 1.0,
+            "latency_ms": {
+              "n": 30,
+              "mean": 105.86873752375443,
+              "std": 34.70554946509766,
+              "median": 98.20256242528558,
+              "p95": 124.81350606540211,
+              "total": 3176.062125712633
+            },
+            "pipeline": "gate_cascade"
+          }
+        ],
+        "aggregate": {
+          "accuracy": {
+            "n": 1,
+            "mean": 1.0,
+            "std": 0.0,
+            "median": 1.0,
+            "p95": 1.0,
+            "total": 1.0
+          },
+          "precision": {
+            "n": 1,
+            "mean": 1.0,
+            "std": 0.0,
+            "median": 1.0,
+            "p95": 1.0,
+            "total": 1.0
+          },
+          "recall": {
+            "n": 1,
+            "mean": 1.0,
+            "std": 0.0,
+            "median": 1.0,
+            "p95": 1.0,
+            "total": 1.0
+          },
+          "f1": {
+            "n": 1,
+            "mean": 1.0,
+            "std": 0.0,
+            "median": 1.0,
+            "p95": 1.0,
+            "total": 1.0
+          },
+          "latency_ms_mean_per_image": {
+            "n": 1,
+            "mean": 105.86873752375443,
+            "std": 0.0,
+            "median": 105.86873752375443,
+            "p95": 105.86873752375443,
+            "total": 105.86873752375443
+          },
+          "latency_ms_total": {
+            "n": 1,
+            "mean": 3176.062125712633,
+            "std": 0.0,
+            "median": 3176.062125712633,
+            "p95": 3176.062125712633,
+            "total": 3176.062125712633
+          },
+          "latency_ms_std_per_image_avg": 34.70554946509766
+        }
+      }
+    },
+    {
+      "version": "v2",
+      "n_samples": 30,
+      "runs": 1,
+      "baseline": {
+        "per_run": [
+          {
+            "accuracy": 1.0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "tp": 30,
+            "fp": 0,
+            "tn": 0,
+            "fn": 0,
+            "threshold": 3.069845676422119,
+            "latency_ms": {
+              "n": 30,
+              "mean": 176.19831250825277,
+              "std": 31.308279447264372,
+              "median": 164.63087557349354,
+              "p95": 238.83573906496167,
+              "total": 5285.949375247583
+            },
+            "pipeline": "baseline_patchcore"
+          }
+        ],
+        "aggregate": {
+          "accuracy": {
+            "n": 1,
+            "mean": 1.0,
+            "std": 0.0,
+            "median": 1.0,
+            "p95": 1.0,
+            "total": 1.0
+          },
+          "precision": {
+            "n": 1,
+            "mean": 1.0,
+            "std": 0.0,
+            "median": 1.0,
+            "p95": 1.0,
+            "total": 1.0
+          },
+          "recall": {
+            "n": 1,
+            "mean": 1.0,
+            "std": 0.0,
+            "median": 1.0,
+            "p95": 1.0,
+            "total": 1.0
+          },
+          "f1": {
+            "n": 1,
+            "mean": 1.0,
+            "std": 0.0,
+            "median": 1.0,
+            "p95": 1.0,
+            "total": 1.0
+          },
+          "latency_ms_mean_per_image": {
+            "n": 1,
+            "mean": 176.19831250825277,
+            "std": 0.0,
+            "median": 176.19831250825277,
+            "p95": 176.19831250825277,
+            "total": 176.19831250825277
+          },
+          "latency_ms_total": {
+            "n": 1,
+            "mean": 5285.949375247583,
+            "std": 0.0,
+            "median": 5285.949375247583,
+            "p95": 5285.949375247583,
+            "total": 5285.949375247583
+          },
+          "latency_ms_std_per_image_avg": 31.308279447264372
+        }
+      },
+      "gate_cascade": {
+        "per_run": [
+          {
+            "accuracy": 0.0,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "tp": 0,
+            "fp": 0,
+            "tn": 0,
+            "fn": 30,
+            "t_low": 0.3,
+            "t_high": 0.7,
+            "patchcore_threshold": 0.0,
+            "heatmap_call_rate": 0.0,
+            "latency_ms": {
+              "n": 30,
+              "mean": 8.500076162939271,
+              "std": 1.0747743810574466,
+              "median": 8.209936902858317,
+              "p95": 10.677837405819442,
+              "total": 255.0022848881781
+            },
+            "pipeline": "gate_cascade"
+          }
+        ],
+        "aggregate": {
+          "accuracy": {
+            "n": 1,
+            "mean": 0.0,
+            "std": 0.0,
+            "median": 0.0,
+            "p95": 0.0,
+            "total": 0.0
+          },
+          "precision": {
+            "n": 1,
+            "mean": 0.0,
+            "std": 0.0,
+            "median": 0.0,
+            "p95": 0.0,
+            "total": 0.0
+          },
+          "recall": {
+            "n": 1,
+            "mean": 0.0,
+            "std": 0.0,
+            "median": 0.0,
+            "p95": 0.0,
+            "total": 0.0
+          },
+          "f1": {
+            "n": 1,
+            "mean": 0.0,
+            "std": 0.0,
+            "median": 0.0,
+            "p95": 0.0,
+            "total": 0.0
+          },
+          "latency_ms_mean_per_image": {
+            "n": 1,
+            "mean": 8.500076162939271,
+            "std": 0.0,
+            "median": 8.500076162939271,
+            "p95": 8.500076162939271,
+            "total": 8.500076162939271
+          },
+          "latency_ms_total": {
+            "n": 1,
+            "mean": 255.0022848881781,
+            "std": 0.0,
+            "median": 255.0022848881781,
+            "p95": 255.0022848881781,
+            "total": 255.0022848881781
+          },
+          "latency_ms_std_per_image_avg": 1.0747743810574466
+        }
+      }
+    },
+    {
+      "version": "v3",
+      "n_samples": 30,
+      "runs": 1,
+      "baseline": {
+        "per_run": [
+          {
+            "accuracy": 1.0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "tp": 30,
+            "fp": 0,
+            "tn": 0,
+            "fn": 0,
+            "threshold": 3.12207293510437,
+            "latency_ms": {
+              "n": 30,
+              "mean": 287.5316027396669,
+              "std": 79.23005502519906,
+              "median": 257.115958025679,
+              "p95": 480.6117710191755,
+              "total": 8625.948082190007
+            },
+            "pipeline": "baseline_patchcore"
+          }
+        ],
+        "aggregate": {
+          "accuracy": {
+            "n": 1,
+            "mean": 1.0,
+            "std": 0.0,
+            "median": 1.0,
+            "p95": 1.0,
+            "total": 1.0
+          },
+          "precision": {
+            "n": 1,
+            "mean": 1.0,
+            "std": 0.0,
+            "median": 1.0,
+            "p95": 1.0,
+            "total": 1.0
+          },
+          "recall": {
+            "n": 1,
+            "mean": 1.0,
+            "std": 0.0,
+            "median": 1.0,
+            "p95": 1.0,
+            "total": 1.0
+          },
+          "f1": {
+            "n": 1,
+            "mean": 1.0,
+            "std": 0.0,
+            "median": 1.0,
+            "p95": 1.0,
+            "total": 1.0
+          },
+          "latency_ms_mean_per_image": {
+            "n": 1,
+            "mean": 287.5316027396669,
+            "std": 0.0,
+            "median": 287.5316027396669,
+            "p95": 287.5316027396669,
+            "total": 287.5316027396669
+          },
+          "latency_ms_total": {
+            "n": 1,
+            "mean": 8625.948082190007,
+            "std": 0.0,
+            "median": 8625.948082190007,
+            "p95": 8625.948082190007,
+            "total": 8625.948082190007
+          },
+          "latency_ms_std_per_image_avg": 79.23005502519906
+        }
+      },
+      "gate_cascade": {
+        "per_run": [
+          {
+            "accuracy": 1.0,
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1": 1.0,
+            "tp": 30,
+            "fp": 0,
+            "tn": 0,
+            "fn": 0,
+            "t_low": 0.3,
+            "t_high": 0.7,
+            "patchcore_threshold": 3.1401360034942627,
+            "heatmap_call_rate": 0.16666666666666666,
+            "latency_ms": {
+              "n": 30,
+              "mean": 50.614845814804234,
+              "std": 91.38872976364628,
+              "median": 9.439875022508204,
+              "p95": 253.33013978088275,
+              "total": 1518.445374444127
+            },
+            "pipeline": "gate_cascade"
+          }
+        ],
+        "aggregate": {
+          "accuracy": {
+            "n": 1,
+            "mean": 1.0,
+            "std": 0.0,
+            "median": 1.0,
+            "p95": 1.0,
+            "total": 1.0
+          },
+          "precision": {
+            "n": 1,
+            "mean": 1.0,
+            "std": 0.0,
+            "median": 1.0,
+            "p95": 1.0,
+            "total": 1.0
+          },
+          "recall": {
+            "n": 1,
+            "mean": 1.0,
+            "std": 0.0,
+            "median": 1.0,
+            "p95": 1.0,
+            "total": 1.0
+          },
+          "f1": {
+            "n": 1,
+            "mean": 1.0,
+            "std": 0.0,
+            "median": 1.0,
+            "p95": 1.0,
+            "total": 1.0
+          },
+          "latency_ms_mean_per_image": {
+            "n": 1,
+            "mean": 50.614845814804234,
+            "std": 0.0,
+            "median": 50.614845814804234,
+            "p95": 50.614845814804234,
+            "total": 50.614845814804234
+          },
+          "latency_ms_total": {
+            "n": 1,
+            "mean": 1518.445374444127,
+            "std": 0.0,
+            "median": 1518.445374444127,
+            "p95": 1518.445374444127,
+            "total": 1518.445374444127
+          },
+          "latency_ms_std_per_image_avg": 91.38872976364628
+        }
+      }
+    }
+  ]
+}

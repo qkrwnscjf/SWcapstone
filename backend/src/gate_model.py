@@ -777,20 +777,29 @@ class GateModel:
         instance = cls(backbone=backbone_name, pretrained=False, device=str(dev))
 
         # --- 가중치 이름표(Key) 강제 매칭 로직 시작 ---
+        # Saved checkpoint stores backbone-original keys (`features.*`, `classifier.1.*`),
+        # but the wrapped model is Sequential(backbone, [Dropout, Linear]) where the
+        # backbone's classifier is replaced with Identity. So:
+        #   features.*       → 0.features.*   (backbone)
+        #   classifier.1.*   → 1.1.*          (Linear head outside the backbone)
         state_dict = payload["model_state_dict"]
         new_state_dict = {}
-        
+
         for k, v in state_dict.items():
-            # 만약 키가 'features'로 시작하면 앞에 '0.'을 붙여서 '0.features'로 만듭니다.
-            if k.startswith("features") or k.startswith("classifier"):
+            if k.startswith("features"):
                 new_key = f"0.{k}"
+            elif k.startswith("classifier."):
+                new_key = f"1.{k.split('.', 1)[1]}"
             else:
                 new_key = k
             new_state_dict[new_key] = v
-        
-        # 이름표가 수정된 new_state_dict를 주입합니다.
-        # strict=False를 함께 사용하여 혹시 모를 미세한 차이도 허용합니다.
-        instance.model.load_state_dict(new_state_dict, strict=False)
+
+        result = instance.model.load_state_dict(new_state_dict, strict=False)
+        if result.missing_keys or result.unexpected_keys:
+            logger.warning(
+                "Gate load key mismatch: missing=%s unexpected=%s",
+                result.missing_keys, result.unexpected_keys,
+            )
         # --- 가중치 이름표(Key) 강제 매칭 로직 끝 ---
 
         instance.threshold = payload.get("threshold", 0.5)

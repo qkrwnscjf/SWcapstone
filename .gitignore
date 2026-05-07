@@ -37,6 +37,8 @@ final_dataset/
 mlruns/
 backend/models/
 models/*.pt
+data/
+data_download/
 
 # data version control 내용 제외
 storage/mlops/

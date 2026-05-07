@@ -1,0 +1,40 @@
+{
+  "tag": "v1",
+  "run_tag": "v1_patchcore_r18",
+  "model_kind": "patchcore",
+  "model_variant": "patchcore_r18",
+  "backbone": "resnet18",
+  "device": "mps",
+  "seed": 42,
+  "batch_size": 32,
+  "coreset_sampling_ratio": 0.005,
+  "num_neighbors": 9,
+  "input_size": 224,
+  "splits_dir": "/Users/danghyeonsong/HYUE/SWCapstone/splits",
+  "train_csv_path": "/Users/danghyeonsong/HYUE/SWCapstone/splits/v1_train_normal.csv",
+  "val_csv_path": "/Users/danghyeonsong/HYUE/SWCapstone/splits/v1_val_mix.csv",
+  "test_csv_path": "/Users/danghyeonsong/HYUE/SWCapstone/splits/v1_test_mix.csv",
+  "train_n_images": 8307,
+  "memory_bank_size": 32564,
+  "metrics": {
+    "val_mix": {
+      "auroc": 0.8472688506836334,
+      "auprc": 0.628390733817413,
+      "f1": 0.5789473684210527,
+      "recall": 0.5301204819277109,
+      "precision": 0.6376811594202898,
+      "optimal_threshold": 4.121691703796387
+    },
+    "test_mix": {
+      "auroc": 0.8503114200871745,
+      "auprc": 0.7429626831573524,
+      "f1": 0.6811023622047244,
+      "recall": 0.6688144329896907,
+      "precision": 0.6938502673796791,
+      "optimal_threshold": 3.906175374984741
+    }
+  },
+  "git_sha": "927ee7406da8e56b8a71a113e48cef057e064223",
+  "trained_at": "2026-05-07T07:44:01.796180Z",
+  "mlflow_used": false
+}

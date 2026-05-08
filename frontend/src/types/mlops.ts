@@ -149,16 +149,16 @@ export type DashboardResponse = {
   active_dataset_id: string;
   dataset_versions: DatasetVersion[];
   architectures: Architecture[];
-  training_recipes?: TrainingRecipe[];
-  training_runs: TrainingRun[];
+  training_runs: any[];
   model_versions: ModelVersion[];
-  feedback_items: FeedbackItem[];
+  feedback_items: any[];
   logs: LogItem[];
-  deployment?: DeploymentState;
-  interfaces?: Record<string, string>;
-  available_model_files?: string[];
-  runtime_config?: {
-    ensemble_enabled?: boolean;
-    current_model_id?: string | null;
+  interfaces: Record<string, string>;
+  available_model_files: string[];
+  runtime_config: {
+    ensemble_enabled: boolean;
+    current_model_id: string | null;
+    gate_file: string | null;
+    heatmap_file: string | null;
   };
 };

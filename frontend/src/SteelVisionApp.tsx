@@ -75,14 +75,16 @@ export default function SteelVisionApp() {
     pollInterval.current = setInterval(async () => {
       try {
         const status = await fetchTrainingStatus();
-        setTrainingStatus(status);
-        if (!status.is_running && trainingStatus.is_running) {
-          await refresh();
-        }
+        setTrainingStatus((prev: any) => {
+          if (prev.is_running && !status.is_running && status.message === "COMPLETED") {
+            refresh();
+          }
+          return status;
+        });
       } catch (e) { /* ignore */ }
     }, 2000);
     return () => { if (pollInterval.current) clearInterval(pollInterval.current); };
-  }, [trainingStatus.is_running]);
+  }, []);
 
   async function runPredict() {
     if (!file) return setFieldMsg("이미지를 먼저 선택해 주세요.");
@@ -255,6 +257,68 @@ export default function SteelVisionApp() {
 
           {dashboard && audience === "admin" && tab === "ops" ? (
             <div className="grid gap-6 lg:grid-cols-2 max-w-7xl mx-auto">
+              <Card className="lg:col-span-2 bg-slate-900 text-white border-none shadow-2xl">
+                <div className="flex items-center justify-between mb-6">
+                  <div>
+                    <div className="text-xl font-black flex items-center gap-2"><Cpu className="h-5 w-5 text-blue-400" /> 실시간 모델 Hot-swap 제어</div>
+                    <div className="text-[11px] font-bold text-slate-500 mt-1 uppercase tracking-wider">서버 재시작 없이 즉시 가중치 교체</div>
+                  </div>
+                  <div className="flex gap-4">
+                    <div className="text-right">
+                      <div className="text-[9px] font-black text-slate-500 uppercase">Active Gate</div>
+                      <div className="text-[11px] font-black text-blue-400">{dashboard.runtime_config.gate_file || "Default"}</div>
+                    </div>
+                    <div className="text-right border-l border-slate-800 pl-4">
+                      <div className="text-[9px] font-black text-slate-500 uppercase">Active Heatmap</div>
+                      <div className="text-[11px] font-black text-emerald-400">{dashboard.runtime_config.heatmap_file || "Default"}</div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 ml-1">GATE MODEL (.pt)</label>
+                    <select id="quick-gate-select" className="w-full bg-slate-800 border border-slate-700 rounded-2xl px-4 py-3 text-xs font-bold text-white outline-none focus:border-blue-500 transition-all">
+                      <option value="">현재 유지</option>
+                      {dashboard.available_model_files?.filter(f => f.includes("gate")).map(f => (
+                        <option key={f} value={f}>{f}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-black text-slate-400 ml-1">HEATMAP MODEL (.pt)</label>
+                    <select id="quick-hm-select" className="w-full bg-slate-800 border border-slate-700 rounded-2xl px-4 py-3 text-xs font-bold text-white outline-none focus:border-emerald-500 transition-all">
+                      <option value="">현재 유지</option>
+                      {dashboard.available_model_files?.filter(f => f.includes("patchcore")).map(f => (
+                        <option key={f} value={f}>{f}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="flex flex-col justify-end">
+                    <button 
+                      onClick={async () => {
+                        const g = (document.getElementById("quick-gate-select") as HTMLSelectElement)?.value;
+                        const h = (document.getElementById("quick-hm-select") as HTMLSelectElement)?.value;
+                        if (!g && !h) return alert("교체할 파일을 선택해 주세요.");
+                        try {
+                          await deployModel({
+                            model_id: "MANUAL_SWAP",
+                            gate_file: g,
+                            heatmap_file: h,
+                            ensemble_enabled: ensembleEnabled
+                          });
+                          await refresh();
+                          alert("모델 Hot-swap 성공!");
+                        } catch (e) { alert("교체 실패"); }
+                      }}
+                      className="w-full h-[46px] rounded-2xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-black shadow-lg transition-all flex items-center justify-center gap-2"
+                    >
+                      <RefreshCcw className="h-4 w-4" /> 즉시 적용하기
+                    </button>
+                  </div>
+                </div>
+              </Card>
+
               <Card>
                 <div className="mb-6 text-xl font-black">운영 현황 요약</div>
                 <div className="grid grid-cols-2 gap-4">
@@ -283,18 +347,42 @@ export default function SteelVisionApp() {
 
           {dashboard && audience === "admin" && tab === "train" ? (
             <div className="grid gap-6 lg:grid-cols-[1.1fr_0.9fr] max-w-7xl mx-auto">
-              <Card>
-                <div className="mb-6 text-xl font-black">대량 데이터 적재</div>
-                <div onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); setBulkFiles((c) => [...c, ...Array.from(e.dataTransfer.files)]); }} className="rounded-3xl border-3 border-dashed border-blue-100 bg-blue-50/30 p-10 flex flex-col items-center group transition-all">
-                  <div className="h-16 w-16 rounded-3xl bg-blue-600 text-white shadow-xl flex items-center justify-center"><Upload className="h-7 w-7" /></div>
-                  <div className="mt-6 text-center"><div className="text-lg font-black">Drag & Drop 또는 파일 선택</div><div className="text-sm text-slate-500 font-bold">학습용 원본 이미지를 업로드합니다.</div></div>
-                  <div className="mt-6 flex gap-3">
-                    <label className="cursor-pointer rounded-2xl bg-blue-600 text-white px-6 py-3 text-sm font-black shadow-lg">파일 선택<input type="file" multiple className="hidden" onChange={(e) => setBulkFiles((c) => [...c, ...Array.from(e.target.files ?? [])])} /></label>
-                    <button onClick={uploadBulk} className="rounded-2xl border-2 border-slate-200 bg-white px-6 py-3 text-sm font-black text-slate-700">누적 적재 실행</button>
+              <div className="space-y-6">
+                <Card>
+                  <div className="mb-6 text-xl font-black">대량 데이터 적재</div>
+                  <div onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); setBulkFiles((c) => [...c, ...Array.from(e.dataTransfer.files)]); }} className="rounded-3xl border-3 border-dashed border-blue-100 bg-blue-50/30 p-10 flex flex-col items-center group transition-all">
+                    <div className="h-16 w-16 rounded-3xl bg-blue-600 text-white shadow-xl flex items-center justify-center"><Upload className="h-7 w-7" /></div>
+                    <div className="mt-6 text-center"><div className="text-lg font-black">Drag & Drop 또는 파일 선택</div><div className="text-sm text-slate-500 font-bold">학습용 원본 이미지를 업로드합니다.</div></div>
+                    <div className="mt-6 flex gap-3">
+                      <label className="cursor-pointer rounded-2xl bg-blue-600 text-white px-6 py-3 text-sm font-black shadow-lg">파일 선택<input type="file" multiple className="hidden" onChange={(e) => setBulkFiles((c) => [...c, ...Array.from(e.target.files ?? [])])} /></label>
+                      <button onClick={uploadBulk} className="rounded-2xl border-2 border-slate-200 bg-white px-6 py-3 text-sm font-black text-slate-700">누적 적재 실행</button>
+                    </div>
                   </div>
-                </div>
-                {uploadMsg && <div className="mt-4 text-center text-xs font-black text-blue-600 animate-pulse">{uploadMsg}</div>}
-              </Card>
+                  {uploadMsg && <div className="mt-4 text-center text-xs font-black text-blue-600 animate-pulse">{uploadMsg}</div>}
+                </Card>
+
+                <Card>
+                  <div className="mb-6 flex items-center justify-between">
+                    <div className="text-xl font-black">최근 업로드 샘플 (Active Dataset)</div>
+                    <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{dashboard.dataset_versions[0]?.samples.length} Items Displayed</div>
+                  </div>
+                  <div className="grid grid-cols-4 sm:grid-cols-5 md:grid-cols-6 gap-3 max-h-[300px] overflow-auto pr-2">
+                    {dashboard.dataset_versions[0]?.samples.length > 0 ? (
+                      dashboard.dataset_versions[0].samples.map((s: any) => (
+                        <div key={s.id} className="group relative aspect-square rounded-xl overflow-hidden bg-slate-100 border border-slate-200">
+                          <img src={asset(s.file_url)} alt={s.file_name} className="h-full w-full object-cover transition-transform group-hover:scale-110" title={s.file_name} />
+                          <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-end p-1.5">
+                            <div className="text-[7px] text-white font-bold truncate w-full">{s.file_name}</div>
+                          </div>
+                        </div>
+                      ))
+                    ) : (
+                      <div className="col-span-full py-10 text-center text-slate-300 font-bold text-xs">업로드된 샘플이 없습니다.</div>
+                    )}
+                  </div>
+                </Card>
+              </div>
+
               <Card>
                 <div className="mb-6 flex items-center justify-between"><div className="text-xl font-black">학습 엔진 제어</div>{trainingStatus.is_running && <RefreshCcw className="h-5 w-5 animate-spin text-blue-600" />}</div>
                 <div className="space-y-6">
@@ -340,18 +428,20 @@ export default function SteelVisionApp() {
                             <div className={cx("text-[9px] font-black uppercase ml-1", isProd ? "text-blue-100" : "text-slate-400")}>Gate File</div>
                             <select id={`gate-select-${m.id}`} className="w-full bg-white border border-slate-200 rounded-xl px-2 py-1.5 text-[10px] font-bold text-slate-700 outline-none focus:border-blue-400 shadow-sm">
                               <option value="">Default (.pt)</option>
-                              {dashboard.available_model_files?.filter(f => f.includes("gate")).map(f => (
-                                <option key={f} value={f}>{f}</option>
-                              ))}
+                              {dashboard.available_model_files?.filter(f => f.includes("gate")).map(f => {
+                                const isNew = f.startsWith("retrained_");
+                                return <option key={f} value={f} className={cx(isNew && "text-blue-600 font-black")}>{isNew ? `★ ${f}` : f}</option>;
+                              })}
                             </select>
                           </div>
                           <div className="space-y-1">
                             <div className={cx("text-[9px] font-black uppercase ml-1", isProd ? "text-blue-100" : "text-slate-400")}>Heatmap File</div>
                             <select id={`hm-select-${m.id}`} className="w-full bg-white border border-slate-200 rounded-xl px-2 py-1.5 text-[10px] font-bold text-slate-700 outline-none focus:border-blue-400 shadow-sm">
                               <option value="">Default (.pt)</option>
-                              {dashboard.available_model_files?.filter(f => f.includes("patchcore")).map(f => (
-                                <option key={f} value={f}>{f}</option>
-                              ))}
+                              {dashboard.available_model_files?.filter(f => f.includes("patchcore")).map(f => {
+                                const isNew = f.startsWith("retrained_");
+                                return <option key={f} value={f} className={cx(isNew && "text-blue-600 font-black")}>{isNew ? `★ ${f}` : f}</option>;
+                              })}
                             </select>
                           </div>
                         </div>

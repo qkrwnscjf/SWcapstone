@@ -1,0 +1,80 @@
+<svg width="1200" height="1200" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background -->
+  <rect width="1200" height="1200" fill="#f8f9fa" />
+  
+  <!-- Main Title -->
+  <text x="600" y="60" font-family="Arial, sans-serif" font-size="34" font-weight="bold" text-anchor="middle" fill="#2d3748">SteelVision: Storage Layer Evolution (JSON vs. DB)</text>
+  <text x="600" y="100" font-family="Arial, sans-serif" font-size="18" text-anchor="middle" fill="#718096">시스템 확장성 확보를 위한 데이터 관리 체계의 진화</text>
+
+  <!-- LEFT: BEFORE (Current JSON-based) -->
+  <rect x="50" y="150" width="520" height="950" rx="20" fill="#fff5f5" stroke="#feb2b2" stroke-width="2" />
+  <text x="310" y="195" font-family="Arial, sans-serif" font-size="22" font-weight="bold" text-anchor="middle" fill="#c53030">Phase 1: File-based (Current)</text>
+  
+  <!-- Backend Engine -->
+  <rect x="100" y="230" width="420" height="120" rx="10" fill="white" stroke="#c53030" />
+  <text x="310" y="265" font-family="Arial, sans-serif" font-size="16" font-weight="bold" text-anchor="middle" fill="#2d3748">Backend Engine (FastAPI)</text>
+  <text x="120" y="300" font-family="Arial, sans-serif" font-size="13" fill="#4a5568">• Direct JSON I/O (전체 파일 읽기/쓰기)</text>
+  <text x="120" y="325" font-family="Arial, sans-serif" font-size="13" fill="#4a5568">• 싱글 스레드 중심의 데이터 동기화</text>
+
+  <!-- State.json -->
+  <g transform="translate(160, 420)">
+    <rect width="300" height="180" rx="10" fill="#fef2f2" stroke="#fc8181" stroke-dasharray="5,5" />
+    <text x="150" y="35" font-family="Arial, sans-serif" font-size="15" font-weight="bold" text-anchor="middle" fill="#c53030">state.json</text>
+    <path d="M 50 60 H 250 M 50 100 H 250 M 50 140 H 250" stroke="#feb2b2" stroke-width="1" />
+    <text x="150" y="85" font-family="Arial, sans-serif" font-size="12" text-anchor="middle" fill="#718096">{ "feedback_items": [...] }</text>
+    <text x="150" y="125" font-family="Arial, sans-serif" font-size="12" text-anchor="middle" fill="#718096">{ "training_runs": [...] }</text>
+  </g>
+
+  <!-- Problem Points -->
+  <g transform="translate(100, 650)">
+    <rect width="420" height="220" rx="15" fill="#fffaf0" stroke="#fbd38d" />
+    <text x="20" y="35" font-family="Arial, sans-serif" font-size="15" font-weight="bold" fill="#9c4221">한계점 (Bottlenecks)</text>
+    <text x="30" y="75" font-family="Arial, sans-serif" font-size="13" fill="#dd6b20">1. 대용량 로그 누적 시 입출력 속도 저하</text>
+    <text x="30" y="110" font-family="Arial, sans-serif" font-size="13" fill="#dd6b20">2. 동시 요청 시 데이터 파손(Corruption) 위험</text>
+    <text x="30" y="145" font-family="Arial, sans-serif" font-size="13" fill="#dd6b20">3. 복잡한 조건부 검색/필터링 성능 한계</text>
+    <text x="30" y="180" font-family="Arial, sans-serif" font-size="13" fill="#dd6b20">4. 데이터 간의 관계(Relation) 표현 불충분</text>
+  </g>
+
+  <!-- RIGHT: AFTER (Future DB-based) -->
+  <rect x="630" y="150" width="520" height="950" rx="20" fill="#f0fff4" stroke="#9ae6b4" stroke-width="2" />
+  <text x="890" y="195" font-family="Arial, sans-serif" font-size="22" font-weight="bold" text-anchor="middle" fill="#2f855a">Phase 2: DB-Integrated (Proposed)</text>
+
+  <!-- Backend Engine with ORM -->
+  <rect x="680" y="230" width="420" height="120" rx="10" fill="white" stroke="#2f855a" />
+  <text x="890" y="265" font-family="Arial, sans-serif" font-size="16" font-weight="bold" text-anchor="middle" fill="#2d3748">Backend Engine (FastAPI + SQLAlchemy)</text>
+  <text x="700" y="300" font-family="Arial, sans-serif" font-size="13" fill="#4a5568">• SQL Query 기반 부분 업데이트 (Efficient)</text>
+  <text x="700" y="325" font-family="Arial, sans-serif" font-size="13" fill="#4a5568">• 트랜잭션(Transaction) 관리를 통한 안전성</text>
+
+  <!-- Database Icon -->
+  <g transform="translate(815, 420)">
+    <!-- Main Cylinder -->
+    <path d="M 0 20 L 0 130 C 0 150, 150 150, 150 130 L 150 20 C 150 40, 0 40, 0 20 Z" fill="#e6fffa" stroke="#38b2ac" stroke-width="2" />
+    <!-- Cylinder Top -->
+    <ellipse cx="75" cy="20" rx="75" ry="20" fill="#b2f5ea" stroke="#38b2ac" stroke-width="2" />
+    <text x="75" y="85" font-family="Arial, sans-serif" font-size="16" font-weight="bold" text-anchor="middle" fill="#2c7a7b">SQL DB</text>
+    <text x="75" y="105" font-family="Arial, sans-serif" font-size="11" text-anchor="middle" fill="#4fd1c5">(PostgreSQL/SQLite)</text>
+  </g>
+
+  <!-- Benefits Points -->
+  <g transform="translate(680, 650)">
+    <rect width="420" height="220" rx="15" fill="#ebf8ff" stroke="#90cdf4" />
+    <text x="20" y="35" font-family="Arial, sans-serif" font-size="15" font-weight="bold" fill="#2b6cb0">개선 효과 (Advantages)</text>
+    <text x="30" y="75" font-family="Arial, sans-serif" font-size="13" fill="#3182ce">1. 수백만 건 데이터도 일정한 응답 속도 유지</text>
+    <text x="30" y="110" font-family="Arial, sans-serif" font-size="13" fill="#3182ce">2. ACID 원칙 준수로 완벽한 데이터 무결성</text>
+    <text x="30" y="145" font-family="Arial, sans-serif" font-size="13" fill="#3182ce">3. 인덱싱(Indexing)을 통한 초고속 검색 제공</text>
+    <text x="30" y="180" font-family="Arial, sans-serif" font-size="13" fill="#3182ce">4. 데이터 간 유기적 연결(PK/FK) 관리 용이</text>
+  </g>
+
+  <!-- Central Message -->
+  <rect x="350" y="1020" width="500" height="80" rx="40" fill="#2d3748" />
+  <text x="600" y="1065" font-family="Arial, sans-serif" font-size="18" font-weight="bold" text-anchor="middle" fill="#ffffff">데이터의 양적 팽창에 대응하는 지능형 구조 전환</text>
+
+  <!-- Connecting Arrow -->
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="5" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#cbd5e0" />
+    </marker>
+  </defs>
+  <path d="M 570 510 L 630 510" stroke="#cbd5e0" stroke-width="4" marker-end="url(#arrow)" />
+
+</svg>

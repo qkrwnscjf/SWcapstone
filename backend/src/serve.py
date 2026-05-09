@@ -439,12 +439,20 @@ async def upload_architecture(
     """모델 구조(Architecture) 등록 API"""
     state = _load_state()
     arch_id = f"ARCH-{kind.upper()}-{uuid.uuid4().hex[:4].upper()}"
-    
+    ext = Path(file.filename or "architecture.json").suffix or ".json"
+    fname = f"{arch_id.lower()}_{uuid.uuid4().hex[:8]}{ext}"
+    fpath = MLOPS_ASSETS_ROOT / "architectures" / fname
+    _ensure_dir(fpath.parent)
+    with open(fpath, "wb") as out:
+        shutil.copyfileobj(file.file, out)
+
     new_arch = {
         "id": arch_id,
         "name": name,
         "kind": kind,
         "created_at": _iso_now(),
+        "file_name": file.filename or fname,
+        "file_url": f"/mlops-assets/architectures/{fname}",
         "interface": {"input": "Image (224x224)", "output": "Score/Heatmap"}
     }
     

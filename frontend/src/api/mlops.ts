@@ -650,7 +650,13 @@ export function deployModel(payload: {
   });
 }
 
-export async function promoteModel(modelVersionId: string, targetStatus: string, gateFile?: string, heatmapFile?: string) {
+export async function promoteModel(
+  modelVersionId: string,
+  targetStatus: string,
+  gateFile?: string,
+  heatmapFile?: string,
+  ensembleEnabled = true
+) {
   if (targetStatus !== "production") {
     writeLocalDeployment({
       staging_model_id: modelVersionId,
@@ -665,7 +671,7 @@ export async function promoteModel(modelVersionId: string, targetStatus: string,
     model_id: modelVersionId,
     gate_file: gateFile,
     heatmap_file: heatmapFile,
-    ensemble_enabled: true,
+    ensemble_enabled: ensembleEnabled,
   });
   writeLocalDeployment({
     production_model_id: modelVersionId,
@@ -689,11 +695,18 @@ export async function startCanary(modelVersionId: string, line?: string) {
   return { model_version: { id: modelVersionId, status: "canary" } as ModelVersion, local_only: true };
 }
 
-export async function rollbackDeployment(modelVersionId?: string) {
+export async function rollbackDeployment(
+  modelVersionId?: string,
+  gateFile?: string,
+  heatmapFile?: string,
+  ensembleEnabled = true
+) {
   const rollbackModelId = modelVersionId || readLocalDeployment().previous_production_model_id || "MODEL-R3-FINAL";
   const response = await deployModel({
     model_id: rollbackModelId,
-    ensemble_enabled: true,
+    gate_file: gateFile,
+    heatmap_file: heatmapFile,
+    ensemble_enabled: ensembleEnabled,
   });
   writeLocalDeployment({
     production_model_id: rollbackModelId,

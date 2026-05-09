@@ -2,7 +2,6 @@ import React, { useEffect, useState } from "react";
 import type { LucideIcon } from "lucide-react";
 import {
   AlertTriangle,
-  Briefcase,
   CheckCircle2,
   ChevronDown,
   Clock3,
@@ -20,6 +19,7 @@ import {
 import { predictAnomaly } from "./api/anomaly";
 import {
   createTrainingRun,
+  deployModel,
   fetchDashboard,
   materializeFeedbackDataset,
   promoteModel,
@@ -27,18 +27,19 @@ import {
   saveTrainingRecipe,
   startCanary,
   stopTrainingRun,
+  uploadArchitecture,
   uploadFeedback,
   uploadDatasetFiles,
 } from "./api/mlops";
 import type { PredictResponse } from "./types/anomaly";
 import type { DashboardResponse, ModelVersion, TrainingRecipe, TrainingRun } from "./types/mlops";
 
-type Audience = "field" | "admin" | "summary";
+type Audience = "field" | "admin";
 type AdminTab = "ops" | "train" | "version" | "logs";
 type LineId = "LINE-A" | "LINE-B" | "LINE-C";
 type Tone = "slate" | "blue" | "green" | "amber" | "red";
 type ViewMode = "raw" | "heatmap" | "overlay";
-type BusyAction = "train" | "stop" | "canary" | "approve" | "rollback" | null;
+type BusyAction = "train" | "stop" | "canary" | "approve" | "rollback" | "architecture" | null;
 
 type LiveSample = {
   sampleId: string;
@@ -52,12 +53,9 @@ type LiveSample = {
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8000";
 const LINES: LineId[] = ["LINE-A", "LINE-B", "LINE-C"];
-const CHART_BARS = [34, 48, 44, 57, 51, 63, 54, 46, 42, 58, 61, 49];
-
 const audienceItems: Array<{ key: Audience; label: string; desc: string; icon: LucideIcon }> = [
   { key: "field", label: "현장", desc: "작업자 검사 HMI", icon: Factory },
   { key: "admin", label: "전산", desc: "운영 / 배포", icon: MonitorCog },
-  { key: "summary", label: "요약", desc: "지표 / 상태", icon: Briefcase },
 ];
 
 const adminTabs: Array<{ key: AdminTab; label: string; icon: LucideIcon }> = [
@@ -155,6 +153,42 @@ function formatKoreaTimestamp(date = new Date()) {
 function asset(path: string) {
   if (!path) return "";
   return path.startsWith("http") || path.startsWith("data:") ? path : `${API_BASE}${path}`;
+}
+
+type ModelFileKind = "gate" | "heatmap";
+
+function fileBasename(path?: string | null) {
+  if (!path) return "";
+  return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+}
+
+function modelFileMatchesKind(fileName: string, kind: ModelFileKind) {
+  const value = fileName.toLowerCase();
+  if (kind === "heatmap") {
+    return value.includes("patchcore") || value.includes("heatmap");
+  }
+  return (
+    value.includes("gate") ||
+    value.includes("effnet") ||
+    value.includes("mnv3") ||
+    (value.startsWith("retrained_") && !value.includes("patchcore"))
+  );
+}
+
+function modelFileOptions(files: string[] = [], kind: ModelFileKind) {
+  const ptFiles = files.filter((fileName) => fileName.toLowerCase().endsWith(".pt"));
+  const matched = ptFiles.filter((fileName) => modelFileMatchesKind(fileName, kind));
+  return matched.length ? matched : ptFiles;
+}
+
+function pickDefaultModelFile(files: string[] = [], model: ModelVersion | null, kind: ModelFileKind) {
+  const direct = fileBasename(
+    kind === "gate" ? model?.gate_model_path ?? model?.filename : model?.heatmap_model_path ?? model?.filename
+  );
+  if (direct && modelFileMatchesKind(direct, kind)) {
+    return direct;
+  }
+  return modelFileOptions(files, kind)[0] ?? "";
 }
 
 function toDisplayDecision(decision?: string | null) {
@@ -288,6 +322,19 @@ function Badge({
       )}
     >
       {children}
+    </span>
+  );
+}
+
+function RequirementTag({ required }: { required: boolean }) {
+  return (
+    <span
+      className={cls(
+        "rounded-full px-2 py-0.5 text-[10px] font-bold",
+        required ? "bg-blue-100 text-blue-700" : "bg-slate-200 text-slate-600"
+      )}
+    >
+      {required ? "필수" : "선택"}
     </span>
   );
 }
@@ -747,6 +794,8 @@ function FieldPage({
         comment,
         line: selectedLine,
         predictedLabel: predictResult?.decision ?? "",
+        gateScore: predictResult?.gate_score,
+        heatmapScore: predictResult?.heatmap_score,
       });
       setFieldMessage("피드백이 작업 데이터셋에 반영되었습니다.");
       await onRefresh();
@@ -898,18 +947,13 @@ function FieldPage({
   );
 }
 
-function OpsView({
-  dashboard,
-  onJumpToField,
-  onOpenVersion,
-  onOpenLogs,
-}: {
-  dashboard: DashboardResponse;
-  onJumpToField: (line: LineId) => void;
-  onOpenVersion: () => void;
-  onOpenLogs: () => void;
-}) {
+function OpsView({ dashboard }: { dashboard: DashboardResponse }) {
   const productionModel = pickProductionModel(dashboard);
+  const stagingModel = pickStagingModel(dashboard);
+  const canaryModel = pickCanaryModel(dashboard);
+  const activeDataset = dashboard.dataset_versions[0];
+  const latestRun = dashboard.training_runs[0] ?? null;
+  const activeRun = dashboard.training_runs.find((run) => ["preparing", "running", "stopping"].includes(run.status ?? ""));
   const dynamicLineStatus = LINES.map((lineId) => {
     const base = baseLineStatus[lineId];
     if (dashboard.deployment.canary_line === lineId) {
@@ -922,14 +966,16 @@ function OpsView({
     }
     return { lineId, ...base };
   });
+  const runtimeGate = dashboard.runtime_config.gate_file ?? "-";
+  const runtimeHeatmap = dashboard.runtime_config.heatmap_file ?? "-";
 
   return (
     <div className="grid h-full min-h-0 grid-rows-[auto_1fr] gap-4">
       <div className="grid grid-cols-4 gap-4">
-        <Stat label="운영 모델" value={productionModel?.id ?? "-"} sub="현재 Production" icon={Cpu} tone="blue" />
+        <Stat label="운영 모델" value={productionModel?.id ?? "-"} sub={productionModel?.name ?? "현재 Production"} icon={Cpu} tone="blue" />
         <Stat label="최근 이상률" value={`${Math.min(99, dashboard.feedback_items.length + 3)}%`} sub="피드백 기준 체감치" icon={AlertTriangle} tone="amber" />
-        <Stat label="누적 피드백" value={`${dashboard.feedback_items.length}건`} sub={dashboard.active_dataset_id} icon={ShieldAlert} tone="slate" />
-        <Stat label="시스템 상태" value="정상" sub={`Canary ${dashboard.deployment.canary_model_id ? "동작 중" : "없음"}`} icon={CheckCircle2} tone="green" />
+        <Stat label="데이터셋" value={activeDataset?.id ?? "-"} sub={`${activeDataset?.sample_count ?? 0} samples / ${activeDataset?.feedback_count ?? 0} feedback`} icon={Database} tone="slate" />
+        <Stat label="학습 상태" value={activeRun ? "진행 중" : "대기"} sub={latestRun?.id ?? "최근 run 없음"} icon={Flame} tone={activeRun ? "amber" : "green"} />
       </div>
 
       <div className="grid min-h-0 grid-cols-[1.15fr_.85fr] gap-4">
@@ -973,29 +1019,27 @@ function OpsView({
 
         <div className="grid min-h-0 grid-rows-[auto_1fr] gap-4">
           <Card className="p-5">
-            <div className="mb-4 text-xl font-bold text-slate-950">즉시 대응</div>
-            <div className="grid gap-3">
-              <button
-                onClick={() => onJumpToField("LINE-B")}
-                className="rounded-2xl border-2 border-blue-600 bg-blue-600 px-4 py-3 text-left text-sm font-semibold text-white"
-              >
-                LINE-B 상세 보기
-              </button>
-              <button
-                onClick={onOpenVersion}
-                className="rounded-2xl border-2 border-slate-200 px-4 py-3 text-left text-sm font-semibold text-slate-800"
-              >
-                문제 샘플 모아보기
-              </button>
-              <button
-                onClick={onOpenLogs}
-                className="rounded-2xl border-2 border-slate-200 px-4 py-3 text-left text-sm font-semibold text-slate-800"
-              >
-                알람 로그 열기
-              </button>
+            <div className="mb-4 text-xl font-bold text-slate-950">운영 체크포인트</div>
+            <div className="grid gap-3 text-sm">
+              <div className="rounded-2xl border-2 border-slate-200 bg-slate-50 p-4">
+                <div className="font-bold text-slate-900">Runtime Artifact</div>
+                <div className="mt-2 grid gap-1 text-slate-600">
+                  <div>Gate: {runtimeGate}</div>
+                  <div>Heatmap: {runtimeHeatmap}</div>
+                </div>
+              </div>
+              <div className="rounded-2xl border-2 border-slate-200 bg-slate-50 p-4">
+                <div className="font-bold text-slate-900">다음 의사결정</div>
+                <div className="mt-2 text-slate-600">
+                  {canaryModel
+                    ? `${dashboard.deployment.canary_line ?? "라인"} Canary 결과 확인 후 승인 여부 결정`
+                    : stagingModel
+                      ? `${stagingModel.id} 배포 승인 검토`
+                      : "대기 중인 배포 리스크 없음"}
+                </div>
+              </div>
             </div>
           </Card>
-
           <Card className="flex min-h-0 flex-col p-5">
             <div className="mb-4 text-xl font-bold text-slate-950">최근 피드백</div>
             <div className="min-h-0 overflow-auto pr-1">
@@ -1117,12 +1161,12 @@ function DeploymentCard({
   };
 
   return (
-    <div className={cls("rounded-2xl border-2 p-4", toneMap[tone])}>
-      <div className="text-sm font-semibold">{title}</div>
-      <div className="mt-2 text-2xl font-bold">{model?.name ?? model?.id ?? "-"}</div>
-      {model?.name ? <div className="mt-1 text-xs opacity-70">{model.id}</div> : null}
-      <div className="mt-2 text-sm opacity-80">{subtitle}</div>
-      <div className="mt-2 text-sm opacity-80">
+    <div className={cls("min-w-0 rounded-xl border-2 p-3", toneMap[tone])}>
+      <div className="text-xs font-bold uppercase tracking-[0.12em] opacity-70">{title}</div>
+      <div className="mt-1 truncate text-sm font-black">{model?.name ?? model?.id ?? "-"}</div>
+      {model?.name ? <div className="mt-0.5 truncate text-[11px] opacity-70">{model.id}</div> : null}
+      <div className="mt-1 min-h-8 text-xs opacity-80">{subtitle}</div>
+      <div className="mt-1 text-xs font-semibold opacity-80">
         F1 {model?.metrics.f1 ?? "-"} / {model?.metrics.latency_ms ?? "-"}ms
       </div>
     </div>
@@ -1460,7 +1504,10 @@ function TrainDeployView({
           <div className="min-h-0 overflow-auto pr-1">
             <div className="grid gap-3 rounded-2xl border-2 border-slate-200 bg-slate-50 p-4">
               <label>
-                <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-400">Model Candidate</div>
+                <div className="flex items-center justify-between gap-2 text-xs font-bold uppercase tracking-[0.18em] text-slate-400">
+                  <span>Model Candidate</span>
+                  <RequirementTag required />
+                </div>
                 <select
                   value={selectedDeployModelId}
                   onChange={(event) => setSelectedDeployModelId(event.target.value)}
@@ -1542,7 +1589,9 @@ function TrainDeployViewV2({
   const recipes = dashboard.training_recipes ?? [];
   const firstRecipe = recipes[0];
   const defaultBaseModelId = productionModel?.id ?? dashboard.model_versions[0]?.id ?? "";
-  const defaultDeployModelId = (candidateModel ?? productionModel ?? dashboard.model_versions[0] ?? null)?.id ?? "";
+  const initialDeployModel = candidateModel ?? productionModel ?? dashboard.model_versions[0] ?? null;
+  const defaultDeployModelId = initialDeployModel?.id ?? "";
+  const availableModelFiles = dashboard.available_model_files ?? [];
   const gateArchitectureId =
     dashboard.architectures.find((arch) => arch.kind === "gate")?.id ?? "ARCH-GATE-EFF";
   const heatmapArchitectureId =
@@ -1558,15 +1607,21 @@ function TrainDeployViewV2({
   const [epochCount, setEpochCount] = useState(firstRecipe?.default_epochs ?? 3);
   const [modelName, setModelName] = useState(() => formatKoreaTimestamp());
   const [recipeDraft, setRecipeDraft] = useState<TrainingRecipe>(() => recipeDraftFrom(firstRecipe));
+  const [ensembleEnabled, setEnsembleEnabled] = useState(dashboard.runtime_config.ensemble_enabled);
+  const [architectureKind, setArchitectureKind] = useState<"gate" | "heatmap">("gate");
+  const [architectureName, setArchitectureName] = useState("");
+  const [architectureFile, setArchitectureFile] = useState<File | null>(null);
 
   const activeRun =
-    dashboard.training_runs.find((run) => ["preparing", "running", "stopping"].includes(run.status)) ?? null;
+    dashboard.training_runs.find((run) => ["preparing", "running", "stopping"].includes(run.status ?? "")) ?? null;
   const latestRun = activeRun ?? dashboard.training_runs[0] ?? null;
   const selectedDataset = dashboard.dataset_versions.find((dataset) => dataset.id === selectedDatasetId);
   const selectedBaseModel = dashboard.model_versions.find((model) => model.id === selectedBaseModelId) ?? null;
   const selectedRecipe = recipes.find((recipe) => recipe.id === selectedRecipeId) ?? firstRecipe;
   const selectedDeployModel =
     dashboard.model_versions.find((model) => model.id === selectedDeployModelId) ?? candidateModel ?? null;
+  const selectedGateFile = pickDefaultModelFile(availableModelFiles, selectedDeployModel, "gate");
+  const selectedHeatmapFile = pickDefaultModelFile(availableModelFiles, selectedDeployModel, "heatmap");
   const runProgress = Math.min(100, Math.max(0, latestRun?.progress ?? 0));
   const runTone: Tone =
     latestRun?.status === "completed"
@@ -1685,6 +1740,31 @@ function TrainDeployViewV2({
     }
   }
 
+  async function handleUploadArchitecture() {
+    if (!architectureName.trim() || !architectureFile) {
+      setMessage("아키텍처 이름과 명세 파일을 모두 선택하세요.");
+      return;
+    }
+
+    try {
+      setBusyAction("architecture");
+      setMessage("");
+      await uploadArchitecture({
+        file: architectureFile,
+        kind: architectureKind,
+        name: architectureName.trim(),
+      });
+      setArchitectureName("");
+      setArchitectureFile(null);
+      setMessage("아키텍처 명세가 백엔드 레지스트리에 등록되었습니다.");
+      await onRefresh();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "아키텍처 등록에 실패했습니다.");
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
   async function handleStartCanary() {
     if (!selectedDeployModel) {
       setMessage("Canary를 시작할 모델을 선택하세요.");
@@ -1698,6 +1778,12 @@ function TrainDeployViewV2({
     try {
       setBusyAction("canary");
       setMessage("");
+      await deployModel({
+        model_id: selectedDeployModel.id,
+        gate_file: selectedGateFile,
+        heatmap_file: selectedHeatmapFile,
+        ensemble_enabled: ensembleEnabled,
+      });
       await startCanary(selectedDeployModel.id, selectedCanaryLine);
       setMessage(`Canary가 ${selectedCanaryLine}에서 시작되었습니다.`);
       await onRefresh();
@@ -1721,7 +1807,9 @@ function TrainDeployViewV2({
     try {
       setBusyAction("approve");
       setMessage("");
-      await promoteModel(selectedDeployModel.id, "production");
+      await promoteModel(selectedDeployModel.id, "production", selectedGateFile, selectedHeatmapFile, ensembleEnabled);
+      setSelectedBaseModelId(selectedDeployModel.id);
+      setSelectedDeployModelId(selectedDeployModel.id);
       setMessage("배포 승인이 완료되어 production 모델이 갱신되었습니다.");
       await onRefresh();
     } catch (error) {
@@ -1735,7 +1823,16 @@ function TrainDeployViewV2({
     try {
       setBusyAction("rollback");
       setMessage("");
-      await rollbackDeployment();
+      const rollbackModelId = dashboard.deployment.previous_production_model_id ?? "MODEL-R3-FINAL";
+      const rollbackModel = dashboard.model_versions.find((model) => model.id === rollbackModelId) ?? null;
+      await rollbackDeployment(
+        undefined,
+        pickDefaultModelFile(availableModelFiles, rollbackModel, "gate"),
+        pickDefaultModelFile(availableModelFiles, rollbackModel, "heatmap"),
+        ensembleEnabled
+      );
+      setSelectedBaseModelId(rollbackModelId);
+      setSelectedDeployModelId(rollbackModelId);
       setMessage("이전 production 후보로 롤백되었습니다.");
       await onRefresh();
     } catch (error) {
@@ -1767,9 +1864,12 @@ function TrainDeployViewV2({
           {message ? <div className="mb-4"><MessageBanner message={message} tone="blue" /></div> : null}
 
           <div className="min-h-0 overflow-auto pr-1">
-            <div className="grid grid-cols-3 gap-3">
+            <div className="grid grid-cols-4 gap-3">
               <label className="rounded-2xl border-2 border-slate-200 bg-slate-50 p-4">
-                <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-400">Dataset</div>
+                <div className="flex items-center justify-between gap-2 text-xs font-bold uppercase tracking-[0.18em] text-slate-400">
+                  <span>Dataset</span>
+                  <RequirementTag required />
+                </div>
                 <select
                   value={selectedDatasetId}
                   onChange={(event) => setSelectedDatasetId(event.target.value)}
@@ -1784,7 +1884,10 @@ function TrainDeployViewV2({
               </label>
 
               <label className="rounded-2xl border-2 border-slate-200 bg-slate-50 p-4">
-                <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-400">Base Model</div>
+                <div className="flex items-center justify-between gap-2 text-xs font-bold uppercase tracking-[0.18em] text-slate-400">
+                  <span>Base Model</span>
+                  <RequirementTag required />
+                </div>
                 <select
                   value={selectedBaseModelId}
                   onChange={(event) => setSelectedBaseModelId(event.target.value)}
@@ -1799,7 +1902,10 @@ function TrainDeployViewV2({
               </label>
 
               <label className="rounded-2xl border-2 border-slate-200 bg-slate-50 p-4">
-                <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-400">Model Name</div>
+                <div className="flex items-center justify-between gap-2 text-xs font-bold uppercase tracking-[0.18em] text-slate-400">
+                  <span>Model Name</span>
+                  <RequirementTag required />
+                </div>
                 <div className="mt-2 flex gap-2">
                   <input
                     value={modelName}
@@ -1817,7 +1923,10 @@ function TrainDeployViewV2({
               </label>
 
               <label className="rounded-2xl border-2 border-slate-200 bg-slate-50 p-4">
-                <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-400">Epoch</div>
+                <div className="flex items-center justify-between gap-2 text-xs font-bold uppercase tracking-[0.18em] text-slate-400">
+                  <span>Epoch</span>
+                  <RequirementTag required />
+                </div>
                 <input
                   type="number"
                   min={1}
@@ -1831,7 +1940,10 @@ function TrainDeployViewV2({
 
             <div className="mt-4 grid grid-cols-[.88fr_1.12fr] gap-4">
               <div className="max-h-72 overflow-auto rounded-2xl border-2 border-slate-200 bg-white p-3">
-                <div className="mb-2 text-sm font-bold text-slate-950">레시피 JSON 목록</div>
+                <div className="mb-2 flex items-center justify-between gap-2 text-sm font-bold text-slate-950">
+                  <span>레시피 JSON 목록</span>
+                  <RequirementTag required />
+                </div>
                 <div className="space-y-2">
                   {recipes.map((recipe) => (
                     <div key={recipe.id} className={cls("rounded-2xl border-2 p-3", recipe.id === selectedRecipeId ? "border-blue-600 bg-blue-50" : "border-slate-200")}>
@@ -1874,7 +1986,10 @@ function TrainDeployViewV2({
               </div>
 
               <div className="rounded-2xl border-2 border-slate-200 bg-slate-50 p-4">
-                <div className="text-sm font-bold text-slate-950">레시피 수정 후 새 JSON 저장</div>
+                <div className="flex items-center justify-between gap-2 text-sm font-bold text-slate-950">
+                  <span>레시피 수정 후 새 JSON 저장</span>
+                  <RequirementTag required={false} />
+                </div>
                 <div className="mt-3 grid grid-cols-2 gap-3">
                   <input className="rounded-xl border-2 border-slate-200 px-3 py-2 text-sm" value={recipeDraft.name} onChange={(e) => setRecipeDraft({ ...recipeDraft, name: e.target.value })} placeholder="name" />
                   <select className="rounded-xl border-2 border-slate-200 px-3 py-2 text-sm" value={recipeDraft.optimizer} onChange={(e) => setRecipeDraft({ ...recipeDraft, optimizer: e.target.value })}>
@@ -1899,9 +2014,64 @@ function TrainDeployViewV2({
             </div>
 
             <div className="mt-4 rounded-2xl border-2 border-slate-200 bg-white p-4">
+              <div className="mb-3 flex items-start justify-between gap-4">
+                <div>
+                  <div className="flex items-center gap-2 text-sm font-bold text-slate-950">
+                    Architecture Registry
+                    <RequirementTag required={false} />
+                  </div>
+                  <div className="mt-1 text-sm text-slate-500">
+                    새로운 모델 구조를 추가할 때만 사용합니다. 기존 Gate/Heatmap 구조로 재학습할 때는 비워둬도 됩니다.
+                  </div>
+                </div>
+                <Badge tone="blue">{dashboard.architectures.length} specs</Badge>
+              </div>
+              <div className="grid grid-cols-[.6fr_1fr_1fr] gap-3">
+                <select
+                  value={architectureKind}
+                  onChange={(event) => setArchitectureKind(event.target.value as "gate" | "heatmap")}
+                  className="rounded-xl border-2 border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900"
+                >
+                  <option value="gate">gate</option>
+                  <option value="heatmap">heatmap</option>
+                </select>
+                <input
+                  value={architectureName}
+                  onChange={(event) => setArchitectureName(event.target.value)}
+                  className="rounded-xl border-2 border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-900"
+                  placeholder="Architecture name"
+                />
+                <input
+                  type="file"
+                  accept=".json,.yaml,.yml,.txt,.py"
+                  onChange={(event) => setArchitectureFile(event.target.files?.[0] ?? null)}
+                  className="rounded-xl border-2 border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
+                />
+              </div>
+              <button
+                onClick={handleUploadArchitecture}
+                disabled={busyAction !== null || !architectureFile || !architectureName.trim()}
+                className="mt-3 w-full rounded-2xl border-2 border-blue-600 bg-blue-600 px-4 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {busyAction === "architecture" ? "등록 중..." : "아키텍처 등록"}
+              </button>
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                {dashboard.architectures.slice(0, 4).map((arch) => (
+                  <div key={arch.id} className="rounded-xl border-2 border-slate-100 bg-slate-50 p-3 text-xs text-slate-600">
+                    <div className="font-bold text-slate-900">{arch.name}</div>
+                    <div className="mt-1">{arch.kind} / {arch.id}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="mt-4 rounded-2xl border-2 border-slate-200 bg-white p-4">
               <div className="flex items-start justify-between gap-4">
                 <div>
-                  <div className="text-sm font-bold text-slate-950">학습 상태</div>
+                  <div className="flex items-center gap-2 text-sm font-bold text-slate-950">
+                    학습 상태
+                    <RequirementTag required={false} />
+                  </div>
                   <div className="mt-1 text-sm text-slate-500">
                     {latestRun ? `${latestRun.name ?? latestRun.id} · ${latestRun.status}` : "아직 학습 런이 없습니다."}
                   </div>
@@ -1953,7 +2123,10 @@ function TrainDeployViewV2({
           <div className="min-h-0 overflow-auto pr-1">
             <div className="grid gap-3 rounded-2xl border-2 border-slate-200 bg-slate-50 p-4">
               <label>
-                <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-400">Model Candidate</div>
+                <div className="flex items-center justify-between gap-2 text-xs font-bold uppercase tracking-[0.18em] text-slate-400">
+                  <span>Model Candidate</span>
+                  <RequirementTag required />
+                </div>
                 <select
                   value={selectedDeployModelId}
                   onChange={(event) => setSelectedDeployModelId(event.target.value)}
@@ -1967,7 +2140,10 @@ function TrainDeployViewV2({
                 </select>
               </label>
               <label>
-                <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-400">Canary Line</div>
+                <div className="flex items-center justify-between gap-2 text-xs font-bold uppercase tracking-[0.18em] text-slate-400">
+                  <span>Canary Line</span>
+                  <RequirementTag required={false} />
+                </div>
                 <select
                   value={selectedCanaryLine}
                   onChange={(event) => setSelectedCanaryLine(event.target.value as LineId)}
@@ -1976,19 +2152,14 @@ function TrainDeployViewV2({
                   {LINES.map((line) => <option key={line}>{line}</option>)}
                 </select>
               </label>
-              <div className="grid grid-cols-2 gap-3 text-sm text-slate-600">
-                <div>기준 모델: {selectedDeployModel?.base_model_version_id ?? "-"}</div>
-                <div>데이터셋: {selectedDeployModel?.dataset_version_id ?? "-"}</div>
-                <div>레시피: {selectedDeployModel?.recipe_id ?? "-"}</div>
-                <div>모델 이름: {selectedDeployModel?.name ?? "-"}</div>
-                <div>Canary 라인: {selectedCanaryLine}</div>
-              </div>
             </div>
 
-            <div className="mt-4 grid gap-4">
-              <DeploymentCard title="Production" tone="slate" model={productionModel} subtitle="실 운영 중" />
-              <DeploymentCard title="Staging" tone="blue" model={stagingModel} subtitle="검증 대기 또는 바로 Canary 진입 가능" />
-              <DeploymentCard title="Canary" tone="amber" model={canaryModel} subtitle={dashboard.deployment.canary_line ? `${dashboard.deployment.canary_line} 검증중` : "현재 없음"} />
+            <div className="mt-4 grid gap-3">
+              <div className="grid grid-cols-3 gap-3">
+                <DeploymentCard title="Production" tone="slate" model={productionModel} subtitle="실 운영 중" />
+                <DeploymentCard title="Staging" tone="blue" model={stagingModel} subtitle="검증 대기 또는 Canary 진입 가능" />
+                <DeploymentCard title="Canary" tone="amber" model={canaryModel} subtitle={dashboard.deployment.canary_line ? `${dashboard.deployment.canary_line} 검증중` : "현재 없음"} />
+              </div>
 
               <div className="grid grid-cols-3 gap-3">
                 <button onClick={handleStartCanary} disabled={busyAction !== null} className="rounded-2xl border-2 border-slate-200 px-4 py-3 text-sm font-semibold text-slate-800 disabled:cursor-not-allowed disabled:opacity-60">
@@ -2324,123 +2495,17 @@ function LogsView({ dashboard }: { dashboard: DashboardResponse }) {
   );
 }
 
-function MiniChart() {
-  const max = Math.max(...CHART_BARS);
-  return (
-    <div className="flex h-[180px] items-end gap-2">
-      {CHART_BARS.map((value, index) => (
-        <div key={value + index} className="flex flex-1 flex-col items-center gap-2">
-          <div
-            className={cls("w-full rounded-t-lg", index >= 8 && index <= 10 ? "bg-amber-400" : "bg-blue-500")}
-            style={{ height: `${(value / max) * 140}px` }}
-          />
-          <div className="text-[10px] text-slate-400">{index + 1}h</div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function SummaryPage({ dashboard }: { dashboard: DashboardResponse }) {
-  const productionModel = pickProductionModel(dashboard);
-  const canaryModel = pickCanaryModel(dashboard);
-  const latestFeedback = dashboard.feedback_items[0];
-
-  return (
-    <div className="grid h-full grid-rows-[auto_1fr] gap-4">
-      <div className="grid grid-cols-4 gap-4">
-        <Stat label="오늘 이상률" value={`${Math.min(99, dashboard.feedback_items.length + 3)}%`} sub="현장 피드백 기준" icon={AlertTriangle} tone="amber" />
-        <Stat label="평균 추론시간" value={`${productionModel?.metrics.latency_ms ?? 53}ms`} sub="실시간 허용 범위" icon={Clock3} tone="blue" />
-        <Stat label="운영 모델" value={productionModel?.id ?? "-"} sub="현재 Production" icon={Cpu} tone="slate" />
-        <Stat label="개선 대기" value={`${dashboard.dataset_versions[0]?.feedback_count ?? 0}건`} sub="검수 후 재학습 예정" icon={Database} tone="green" />
-      </div>
-
-      <div className="grid min-h-0 grid-cols-[1.1fr_.9fr] gap-4">
-        <Card className="p-5">
-          <div className="mb-4 text-xl font-bold text-slate-950">현재 상황 요약</div>
-          <MiniChart />
-          <div className="mt-4 grid grid-cols-3 gap-3">
-            <div className="rounded-2xl border-2 border-slate-200 bg-slate-50 p-4">
-              <div className="text-xs text-slate-500">활성 데이터셋</div>
-              <div className="mt-2 text-2xl font-bold text-slate-950">{dashboard.active_dataset_id}</div>
-              <div className="mt-1 text-sm text-slate-500">누적 샘플 {dashboard.dataset_versions[0]?.sample_count ?? 0}</div>
-            </div>
-            <div className="rounded-2xl border-2 border-slate-200 bg-slate-50 p-4">
-              <div className="text-xs text-slate-500">운영 안정도</div>
-              <div className="mt-2 text-2xl font-bold text-slate-950">
-                {dashboard.deployment.canary_model_id ? "92/100" : "97/100"}
-              </div>
-              <div className="mt-1 text-sm text-slate-500">로그 / 배포 상태 기반</div>
-            </div>
-            <div className="rounded-2xl border-2 border-slate-200 bg-slate-50 p-4">
-              <div className="text-xs text-slate-500">배포 후보</div>
-              <div className="mt-2 text-2xl font-bold text-slate-950">{canaryModel?.id ?? pickStagingModel(dashboard)?.id ?? "-"}</div>
-              <div className="mt-1 text-sm text-slate-500">
-                {dashboard.deployment.canary_line ? `${dashboard.deployment.canary_line} Canary` : "후보 없음"}
-              </div>
-            </div>
-          </div>
-        </Card>
-
-        <div className="grid gap-4">
-          <Card className="p-5">
-            <div className="mb-4 text-xl font-bold text-slate-950">핵심 리스크</div>
-            <div className="space-y-3">
-              <div className="rounded-2xl border-2 border-amber-200 bg-amber-50 p-4">
-                <div className="font-semibold text-amber-900">신뢰도 표시는 gate 확률 기준으로 고정</div>
-                <div className="mt-1 text-sm text-amber-800">heatmap score는 별도 지표로 표시해 100% 초과 문제를 방지했습니다.</div>
-              </div>
-              <div className="rounded-2xl border-2 border-blue-200 bg-blue-50 p-4">
-                <div className="font-semibold text-blue-900">Heatmap / Overlay 응답 형식 정렬</div>
-                <div className="mt-1 text-sm text-blue-800">백엔드가 base64 heatmap과 overlay를 모두 반환하도록 맞췄습니다.</div>
-              </div>
-            </div>
-          </Card>
-
-          <Card className="p-5">
-            <div className="mb-4 text-xl font-bold text-slate-950">오늘의 흐름</div>
-            <div className="space-y-3 text-sm text-slate-700">
-              <div className="rounded-2xl border-2 border-transparent bg-slate-50 p-4">
-                현장 검사는 업로드 이미지 기준으로 즉시 추론하고 피드백까지 저장할 수 있습니다.
-              </div>
-              <div className="rounded-2xl border-2 border-transparent bg-slate-50 p-4">
-                전산 화면에서는 새 학습, Canary 시작, 배포 승인, 롤백이 실제 상태를 갱신합니다.
-              </div>
-              <div className="rounded-2xl border-2 border-transparent bg-slate-50 p-4">
-                최근 피드백: {latestFeedback ? `${latestFeedback.feedback_type} / ${formatDate(latestFeedback.created_at)}` : "아직 없음"}
-              </div>
-            </div>
-          </Card>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function AdminPage({
   adminTab,
   dashboard,
   onRefresh,
-  onJumpToField,
-  onOpenVersion,
-  onOpenLogs,
 }: {
   adminTab: AdminTab;
   dashboard: DashboardResponse;
   onRefresh: () => Promise<void>;
-  onJumpToField: (line: LineId) => void;
-  onOpenVersion: () => void;
-  onOpenLogs: () => void;
 }) {
   if (adminTab === "ops") {
-    return (
-      <OpsView
-        dashboard={dashboard}
-        onJumpToField={onJumpToField}
-        onOpenVersion={onOpenVersion}
-        onOpenLogs={onOpenLogs}
-      />
-    );
+    return <OpsView dashboard={dashboard} />;
   }
   if (adminTab === "train") {
     return <TrainDeployViewV2 dashboard={dashboard} onRefresh={onRefresh} />;
@@ -2476,7 +2541,7 @@ export default function App() {
   }, []);
 
   const hasActiveTraining = Boolean(
-    dashboard?.training_runs.some((run) => ["preparing", "running", "stopping"].includes(run.status))
+    dashboard?.training_runs.some((run) => ["preparing", "running", "stopping"].includes(run.status ?? ""))
   );
 
   useEffect(() => {
@@ -2497,16 +2562,8 @@ export default function App() {
           adminTab={adminTab}
           dashboard={dashboard}
           onRefresh={refresh}
-          onJumpToField={(line) => {
-            setSelectedLine(line);
-            setAudience("field");
-          }}
-          onOpenVersion={() => setAdminTab("version")}
-          onOpenLogs={() => setAdminTab("logs")}
         />
       );
-    } else {
-      content = <SummaryPage dashboard={dashboard} />;
     }
   }
 

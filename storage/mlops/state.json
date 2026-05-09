@@ -5,25 +5,183 @@
       "id": "DATA-V3-PRODUCTION",
       "name": "Round 3 Pool",
       "status": "locked",
-      "sample_count": 14850,
-      "feedback_count": 0,
+      "sample_count": 14853,
+      "feedback_count": 2,
       "samples": [],
       "updated_at": "2026-04-15T04:50:56"
     }
   ],
   "model_versions": [
     {
-      "id": "MODEL-R3-FINAL",
+      "id": "MODEL-RUN-AB81",
+      "name": "New ARCH-GATE-EFF",
       "status": "production",
+      "metrics": {
+        "loss": 0.25,
+        "acc": 0.9
+      },
+      "lineage": "Retrained"
+    },
+    {
+      "id": "MODEL-RUN-155D",
+      "name": "New ARCH-GATE-EFF",
+      "status": "candidate",
+      "metrics": {
+        "loss": 0.05,
+        "acc": 0.9
+      },
+      "lineage": "Retrained"
+    },
+    {
+      "id": "MODEL-R3-FINAL",
+      "status": "candidate",
       "metrics": {
         "f1": 0.94
       },
       "lineage": "Round 3 Cascade"
     }
   ],
-  "training_runs": [],
-  "feedback_items": [],
+  "training_runs": [
+    {
+      "id": "MODEL-RUN-AB81",
+      "architecture": "ARCH-GATE-EFF",
+      "params": {
+        "architecture": "ARCH-GATE-EFF",
+        "epochs": 2,
+        "batch_size": 32,
+        "learning_rate": 0.001,
+        "optimizer": "Adam",
+        "augmentation": true
+      },
+      "final_metrics": {
+        "loss": 0.25,
+        "acc": 0.9
+      },
+      "completed_at": "2026-05-09T00:32:29"
+    },
+    {
+      "id": "MODEL-RUN-155D",
+      "architecture": "ARCH-GATE-EFF",
+      "params": {
+        "architecture": "ARCH-GATE-EFF",
+        "epochs": 10,
+        "batch_size": 32,
+        "learning_rate": 0.001,
+        "optimizer": "Adam",
+        "augmentation": true
+      },
+      "final_metrics": {
+        "loss": 0.05,
+        "acc": 0.9
+      },
+      "completed_at": "2026-05-08T23:51:29"
+    }
+  ],
+  "feedback_items": [
+    {
+      "id": "FDBK-AD666CD8",
+      "feedback_type": "needs_review",
+      "label": "unlabeled",
+      "operator": "operator-01",
+      "comment": "판정 보류",
+      "line": "LINE-A",
+      "image_url": "/mlops-assets/feedback/2921d1be53534129aec6dacd626c1a73.bmp",
+      "created_at": "2026-05-09T00:31:59",
+      "model_prediction": {
+        "gate_score": 0.9999998807907104,
+        "heatmap_score": 4.805501937866211,
+        "predicted_label": "anomaly"
+      }
+    },
+    {
+      "id": "FDBK-DBE77B87",
+      "feedback_type": "needs_review",
+      "label": "unlabeled",
+      "operator": "operator-01",
+      "comment": "판정 보류",
+      "line": "LINE-A",
+      "image_url": "/mlops-assets/feedback/813d65b2b9d34bf8809a0ccaabfa02b8.bmp",
+      "created_at": "2026-05-08T23:50:17",
+      "model_prediction": {
+        "gate_score": 0.9999982118606567,
+        "heatmap_score": 4.346529960632324,
+        "predicted_label": "anomaly"
+      }
+    }
+  ],
   "logs": [
+    {
+      "id": "DDF92009",
+      "time": "2026-05-09T00:33:08",
+      "level": "info",
+      "message": "Bulk upload: 2 files"
+    },
+    {
+      "id": "B817C2C7",
+      "time": "2026-05-09T00:32:40",
+      "level": "warning",
+      "message": "Deployment Success: MODEL-RUN-AB81 (File: )"
+    },
+    {
+      "id": "D64852E6",
+      "time": "2026-05-09T00:32:29",
+      "level": "success",
+      "message": "Training Completed: MODEL-RUN-AB81"
+    },
+    {
+      "id": "D5C915E6",
+      "time": "2026-05-09T00:32:27",
+      "level": "info",
+      "message": "Training Started: ARCH-GATE-EFF"
+    },
+    {
+      "id": "866A3B47",
+      "time": "2026-05-09T00:31:59",
+      "level": "info",
+      "message": "Data Ingested: needs_review (Actual: unlabeled)"
+    },
+    {
+      "id": "813865EA",
+      "time": "2026-05-08T23:54:46",
+      "level": "warning",
+      "message": "Deployment Success: MODEL-RUN-155D (File: )"
+    },
+    {
+      "id": "7A77184B",
+      "time": "2026-05-08T23:54:14",
+      "level": "warning",
+      "message": "Deployment Success: MODEL-R3-FINAL (File: )"
+    },
+    {
+      "id": "ADE7C301",
+      "time": "2026-05-08T23:52:07",
+      "level": "warning",
+      "message": "Deployment Success: MODEL-RUN-155D (File: )"
+    },
+    {
+      "id": "EFC8D5DC",
+      "time": "2026-05-08T23:51:29",
+      "level": "success",
+      "message": "Training Completed: MODEL-RUN-155D"
+    },
+    {
+      "id": "ECB49882",
+      "time": "2026-05-08T23:51:19",
+      "level": "info",
+      "message": "Training Started: ARCH-GATE-EFF"
+    },
+    {
+      "id": "124BDDA6",
+      "time": "2026-05-08T23:50:38",
+      "level": "info",
+      "message": "Bulk upload: 1 files"
+    },
+    {
+      "id": "0E7A610F",
+      "time": "2026-05-08T23:50:17",
+      "level": "info",
+      "message": "Data Ingested: needs_review (Actual: unlabeled)"
+    },
     {
       "id": "D6828120",
       "time": "2026-04-24T08:01:05",

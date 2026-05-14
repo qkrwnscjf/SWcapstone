@@ -47,6 +47,18 @@ gate:
       weight_decay: 0.0001
       scheduler: "cosine"
       pos_weight_auto: true
+    mnv3_small:
+      # Light gate: smallest torchvision MobileNet (~2.5M params).
+      backbone: "mobilenet_v3_small"
+      pretrained: true
+      num_classes: 2
+      input_size: [224, 224]
+      batch_size: 32
+      epochs: 30
+      lr: 0.001
+      weight_decay: 0.0001
+      scheduler: "cosine"
+      pos_weight_auto: true
 
 # --- Heatmap Model ---
 heatmap:

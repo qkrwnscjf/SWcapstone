@@ -1,0 +1,44 @@
+{
+  "v1_effnetb0": {
+    "backbone": "efficientnet_b0",
+    "params": 4008829,
+    "cpu_ms_mean": 33.93240419682115,
+    "cpu_ms_std": 1.5919427573075688,
+    "cpu_ms_p50": 33.24010455980897
+  },
+  "v1_mnv3_small": {
+    "backbone": "mobilenet_v3_small",
+    "params": 927585,
+    "cpu_ms_mean": 9.305231156758964,
+    "cpu_ms_std": 0.5918472781130514,
+    "cpu_ms_p50": 9.160124929621816
+  },
+  "v2_effnetb0": {
+    "backbone": "efficientnet_b0",
+    "params": 4008829,
+    "cpu_ms_mean": 46.80001891683787,
+    "cpu_ms_std": 6.738829508398909,
+    "cpu_ms_p50": 43.723167036660016
+  },
+  "v2_mnv3_small": {
+    "backbone": "mobilenet_v3_small",
+    "params": 927585,
+    "cpu_ms_mean": 15.526016661897302,
+    "cpu_ms_std": 4.1915425903454935,
+    "cpu_ms_p50": 16.187791945412755
+  },
+  "v3_effnetb0": {
+    "backbone": "efficientnet_b0",
+    "params": 4008829,
+    "cpu_ms_mean": 43.63003958715126,
+    "cpu_ms_std": 7.149648678145326,
+    "cpu_ms_p50": 42.83504211343825
+  },
+  "v3_mnv3_small": {
+    "backbone": "mobilenet_v3_small",
+    "params": 927585,
+    "cpu_ms_mean": 12.10171882994473,
+    "cpu_ms_std": 2.8622211619936233,
+    "cpu_ms_p50": 11.08412491157651
+  }
+}

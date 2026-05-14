@@ -34,6 +34,19 @@ gate:
       early_stopping_patience: 7
       calibration: "isotonic"
       freeze_backbone_epochs: 3
+    mnv3_small:
+      # Light gate: ~2.5M params, intended as fast first-stage filter.
+      backbone: "mobilenet_v3_small"
+      input_size: 224
+      batch_size: 32
+      epochs: 30
+      lr: 0.001
+      weight_decay: 0.0001
+      pos_weight_auto: true
+      scheduler: "cosine"
+      early_stopping_patience: 7
+      calibration: "isotonic"
+      freeze_backbone_epochs: 3
 
 # Heatmap model config
 heatmap:

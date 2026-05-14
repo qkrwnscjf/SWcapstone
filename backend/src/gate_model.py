@@ -7,6 +7,7 @@ Outputs p_gate(anomaly) in [0, 1] via sigmoid on a single logit.
 Supported backbones:
     - EfficientNet-B0   (torchvision.models.efficientnet_b0)
     - MobileNetV3-Large (torchvision.models.mobilenet_v3_large)
+    - MobileNetV3-Small (torchvision.models.mobilenet_v3_small)  # light gate
 
 Usage:
     from src.gate_model import GateModel
@@ -50,7 +51,11 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 INPUT_SIZE: int = 224
-_VALID_BACKBONES = ("efficientnet_b0", "mobilenet_v3_large")
+_VALID_BACKBONES = (
+    "efficientnet_b0",
+    "mobilenet_v3_large",
+    "mobilenet_v3_small",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -142,9 +147,16 @@ def _build_backbone(
         base.classifier = nn.Identity()
         return base, num_features
 
-    # mobilenet_v3_large
-    weights = models.MobileNet_V3_Large_Weights.DEFAULT if pretrained else None
-    base = models.mobilenet_v3_large(weights=weights)
+    if name == "mobilenet_v3_large":
+        weights = models.MobileNet_V3_Large_Weights.DEFAULT if pretrained else None
+        base = models.mobilenet_v3_large(weights=weights)
+        num_features = base.classifier[0].in_features
+        base.classifier = nn.Identity()
+        return base, num_features
+
+    # mobilenet_v3_small (light gate)
+    weights = models.MobileNet_V3_Small_Weights.DEFAULT if pretrained else None
+    base = models.mobilenet_v3_small(weights=weights)
     num_features = base.classifier[0].in_features
     base.classifier = nn.Identity()
     return base, num_features
@@ -159,7 +171,8 @@ class GateModel:
     Parameters
     ----------
     backbone : str
-        One of ``"efficientnet_b0"`` or ``"mobilenet_v3_large"``.
+        One of ``"efficientnet_b0"``, ``"mobilenet_v3_large"``, or
+        ``"mobilenet_v3_small"`` (light gate).
     pretrained : bool
         Load ImageNet-pretrained weights for the backbone.
     device : str or None
@@ -773,24 +786,45 @@ class GateModel:
         dev = _resolve_device(device)
         payload = torch.load(path, map_location=dev, weights_only=False)
 
-        backbone_name = payload.get("backbone_name", "efficientnet_b0")
+        # train_gate.py writes "backbone" and "gate_name"; older checkpoints use
+        # "backbone_name". Resolve in that priority and fall back to gate_name.
+        gate_to_backbone = {
+            "effnetb0": "efficientnet_b0",
+            "mnv3_large": "mobilenet_v3_large",
+            "mnv3_small": "mobilenet_v3_small",
+        }
+        backbone_name = (
+            payload.get("backbone_name")
+            or payload.get("backbone")
+            or gate_to_backbone.get(payload.get("gate_name", ""))
+            or "efficientnet_b0"
+        )
         instance = cls(backbone=backbone_name, pretrained=False, device=str(dev))
 
         # --- 가중치 이름표(Key) 강제 매칭 로직 시작 ---
+        # Saved checkpoint stores backbone-original keys (`features.*`, `classifier.1.*`),
+        # but the wrapped model is Sequential(backbone, [Dropout, Linear]) where the
+        # backbone's classifier is replaced with Identity. So:
+        #   features.*       → 0.features.*   (backbone)
+        #   classifier.1.*   → 1.1.*          (Linear head outside the backbone)
         state_dict = payload["model_state_dict"]
         new_state_dict = {}
-        
+
         for k, v in state_dict.items():
-            # 만약 키가 'features'로 시작하면 앞에 '0.'을 붙여서 '0.features'로 만듭니다.
-            if k.startswith("features") or k.startswith("classifier"):
+            if k.startswith("features"):
                 new_key = f"0.{k}"
+            elif k.startswith("classifier."):
+                new_key = f"1.{k.split('.', 1)[1]}"
             else:
                 new_key = k
             new_state_dict[new_key] = v
-        
-        # 이름표가 수정된 new_state_dict를 주입합니다.
-        # strict=False를 함께 사용하여 혹시 모를 미세한 차이도 허용합니다.
-        instance.model.load_state_dict(new_state_dict, strict=False)
+
+        result = instance.model.load_state_dict(new_state_dict, strict=False)
+        if result.missing_keys or result.unexpected_keys:
+            logger.warning(
+                "Gate load key mismatch: missing=%s unexpected=%s",
+                result.missing_keys, result.unexpected_keys,
+            )
         # --- 가중치 이름표(Key) 강제 매칭 로직 끝 ---
 
         instance.threshold = payload.get("threshold", 0.5)

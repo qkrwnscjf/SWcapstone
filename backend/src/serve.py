@@ -141,8 +141,11 @@ async def predict(file: UploadFile = File(...)):
     img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
     transform = transforms.Compose([transforms.Resize((224, 224)), transforms.ToTensor(), transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
     tensor = transform(img).unsqueeze(0).to(DEVICE)
+    # 1단계 Light Gate: sigmoid 확률만 산출 (백본은 MNV3-Small/Large/EFB0 중 선택)
     with torch.no_grad(): prob = torch.sigmoid(_production_gate["model"](tensor)).item()
+    # 1→2단계 cascade 분기: prob > T_low 인 입력만 PatchCore 호출 (벤치마크상 호출률 ~0.5%)
     heatmap_res = _heatmap_model.predict(tensor) if _ensemble_enabled and prob > _production_gate["T_low"] and _heatmap_model else None
+    # 최종 score 우선순위: heatmap(있을 때) > gate(앙상블 OFF) > 0.0
     score = heatmap_res["anomaly_score"] if heatmap_res else (prob if not _ensemble_enabled else 0.0)
     decision = "anomaly" if score > 0.5 else "normal"
     issue_type = await vllm_diagnose(img_bytes, score) if decision == "anomaly" else "정상"
